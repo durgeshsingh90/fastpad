@@ -24,9 +24,9 @@ for arg in "$@"; do
 done
 
 if [[ ${#ARGS[@]} -gt 0 ]]; then
-  open -n "$APP" --args "${ARGS[@]}"
+  open -a "$APP" "${ARGS[@]}"
 else
-  open -n "$APP"
+  open "$APP"
 fi
 
 echo "Started FastPad: $APP"

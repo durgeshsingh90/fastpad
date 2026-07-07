@@ -72,8 +72,8 @@ Source: `fastpad_ai_native_complete_srs.json`
 
 | Module | Status | Current coverage |
 |---|---:|---|
-| MOD-001 Application Shell | Partial | Launch, native window, Notepad++-style native menu skeleton, New, Open, multi-select Open, Finder Open With event hook, Save, Save As, Save Copy, quit prompt for active unsaved document, File Exit, visible Macro/Run/Plugins placeholders, Page Down. Missing multi-window, safe mode, session restore, and implementations for many visible disabled menu commands. |
-| MOD-002 Document Manager | Partial | Single active document manager, dirty state, open/save/save-as/save-copy path metadata. Missing tabs, close lifecycle, reload/external modification prompts, full metadata lifecycle. |
+| MOD-001 Application Shell | Partial | Launch, native window, single-window tab strip, Notepad++-style native menu skeleton, New, Open, multi-select Open, Finder/Open With event hook, existing-window start-script routing, Save, Save As, Save Copy, quit prompt for unsaved documents, File Exit, visible Macro/Run/Plugins/Tab placeholders, Page Down. Missing multi-window, safe mode, session restore, drag/drop tabs, split UI, and implementations for many visible disabled menu commands. |
+| MOD-002 Document Manager | Partial | Shared document store, lightweight tabs, independent per-tab view state, path reuse without document reload, dirty state, open/save/save-as/save-copy path metadata. Missing close lifecycle, recently closed tabs, persisted sessions, reload/external modification prompts, full metadata lifecycle. |
 | MOD-003 File Engine | Partial | File handles, metadata, sample encoding/line ending/binary detection, mmap, chunk reads, atomic writes. Missing file watch integration, backups, conversion APIs. |
 | MOD-004 Text Buffer | Partial | Rope edit buffer exists and is unit-tested. Missing broader editor-buffer API surface and integrations. |
 | MOD-005 Undo Redo Engine | Partial | Basic reversible transactions. Missing edit grouping policy, memory limits, command integration breadth. |

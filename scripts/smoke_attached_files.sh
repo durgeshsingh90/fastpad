@@ -39,7 +39,7 @@ for file in "${FILES[@]}"; do
   echo "Launching FastPad with $file"
   FASTPAD_SKIP_BUILD=1 "$ROOT/start.sh" "$file" >/dev/null
   sleep 2
-  if ! pgrep -fl "FastPad.app/Contents/MacOS/FastPad.*$file" >/dev/null; then
+  if ! pgrep -fl "FastPad.app/Contents/MacOS/FastPad" >/dev/null; then
     echo "FastPad did not stay running for: $file" >&2
     exit 1
   fi

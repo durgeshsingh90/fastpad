@@ -7,7 +7,7 @@ use cocoa::appkit::{
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use fastpad_core::{AppSettings, DocumentManager, EditorMode, OpenIntent};
+use fastpad_core::{AppSettings, DocumentManager, EditorMode, OpenIntent, TabSummary};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
 use libc::c_char;
 use objc::declare::ClassDecl;
@@ -32,20 +32,20 @@ const NS_VIEW_MIN_Y_MARGIN: u64 = 8;
 struct AppState {
     manager: DocumentManager,
     window: id,
+    tab_bar: id,
     text_view: id,
     status_field: id,
-    next_anchor: Option<ViewAnchor>,
     last_presented_text: String,
 }
 
 impl AppState {
-    unsafe fn new(window: id, text_view: id, status_field: id) -> Self {
+    unsafe fn new(window: id, tab_bar: id, text_view: id, status_field: id) -> Self {
         Self {
             manager: DocumentManager::new(AppSettings::default()),
             window,
+            tab_bar,
             text_view,
             status_field,
-            next_anchor: None,
             last_presented_text: String::new(),
         }
     }
@@ -56,35 +56,8 @@ impl AppState {
     }
 
     unsafe fn open_path(&mut self, path: &Path) {
-        match self.manager.open(path, OpenIntent::default()) {
-            Ok(id) => {
-                if let Some(doc) = self.manager.get(id) {
-                    let mut doc = doc.write();
-                    let mode = doc.mode();
-                    let settings = self.manager.settings().clone();
-                    match doc.initial_viewport(&settings) {
-                        Ok(viewport) => {
-                            let text = if mode == EditorMode::Edit {
-                                self.next_anchor = None;
-                                match doc.full_text_for_editing() {
-                                    Ok(text) => text,
-                                    Err(error) => {
-                                        self.show_error(&format!("Open failed: {error:#}"));
-                                        return;
-                                    }
-                                }
-                            } else {
-                                self.next_anchor = Some(viewport.next_anchor());
-                                viewport.text()
-                            };
-                            self.present_text(text, mode == EditorMode::Edit);
-                            set_window_title(self.window, &format!("{} - FastPad", doc.title()));
-                            set_status(self.status_field, &doc.status_line());
-                        }
-                        Err(error) => self.show_error(&format!("Open failed: {error:#}")),
-                    }
-                }
-            }
+        match self.manager.open_tab(path, OpenIntent::default()) {
+            Ok(_) => self.render_active_tab(),
             Err(error) => self.show_error(&format!("Open failed: {error:#}")),
         }
     }
@@ -100,18 +73,71 @@ impl AppState {
     }
 
     unsafe fn new_document(&mut self) {
-        let id = self.manager.new_untitled();
-        if let Some(doc) = self.manager.get(id) {
-            let doc = doc.read();
-            self.next_anchor = None;
-            self.present_text(String::new(), true);
-            set_window_title(self.window, "Untitled - FastPad");
-            set_status(self.status_field, &doc.status_line());
+        self.manager.new_untitled_tab();
+        self.render_active_tab();
+    }
+
+    unsafe fn render_active_tab(&mut self) {
+        let Some(doc) = self.manager.active() else {
+            self.present_text(String::new(), false);
+            set_window_title(self.window, "FastPad");
+            set_status(self.status_field, "No document open");
+            self.refresh_tab_bar();
+            return;
+        };
+
+        let settings = self.manager.settings().clone();
+        let view = self.manager.active_view_state().unwrap_or_default();
+        let mut next_anchor = None;
+        let mut rendered_anchor = view.anchor;
+        let mut doc = doc.write();
+        let mode = doc.mode();
+        let title = doc.title().to_string();
+        let status = doc.status_line();
+
+        let text = if mode == EditorMode::Edit {
+            match doc.full_text_for_editing() {
+                Ok(text) => text,
+                Err(error) => {
+                    self.show_error(&format!("Render failed: {error:#}"));
+                    return;
+                }
+            }
+        } else {
+            match doc.viewport(ViewportRequest {
+                anchor: view.anchor,
+                max_lines: settings.initial_viewport_lines,
+                max_bytes: settings.initial_viewport_bytes,
+            }) {
+                Ok(viewport) => {
+                    rendered_anchor = ViewAnchor::Byte(viewport.start);
+                    next_anchor = Some(viewport.next_anchor());
+                    viewport.text()
+                }
+                Err(error) => {
+                    self.show_error(&format!("Render failed: {error:#}"));
+                    return;
+                }
+            }
+        };
+        drop(doc);
+
+        if mode == EditorMode::ViewAnalysis {
+            self.manager.update_active_view_state(|view| {
+                view.anchor = rendered_anchor;
+                view.next_anchor = next_anchor;
+            });
         }
+
+        self.present_text(text, mode == EditorMode::Edit);
+        set_window_title(self.window, &format!("{title} - FastPad"));
+        set_status(self.status_field, &status);
+        self.refresh_tab_bar();
     }
 
     unsafe fn page_down(&mut self) {
-        let Some(anchor) = self.next_anchor else {
+        let view = self.manager.active_view_state().unwrap_or_default();
+        let Some(anchor) = view.next_anchor else {
             return;
         };
         let Some(doc) = self.manager.active() else {
@@ -128,9 +154,15 @@ impl AppState {
             max_bytes: settings.initial_viewport_bytes,
         }) {
             Ok(viewport) => {
-                self.next_anchor = Some(viewport.next_anchor());
+                let rendered_anchor = ViewAnchor::Byte(viewport.start);
+                let next_anchor = viewport.next_anchor();
                 self.present_text(viewport.text(), false);
                 set_status(self.status_field, &doc.status_line());
+                drop(doc);
+                self.manager.update_active_view_state(|view| {
+                    view.anchor = rendered_anchor;
+                    view.next_anchor = Some(next_anchor);
+                });
             }
             Err(error) => self.show_error(&format!("Page failed: {error:#}")),
         }
@@ -154,13 +186,17 @@ impl AppState {
 
     unsafe fn active_document_has_unsaved_changes(&self) -> bool {
         let Some(doc) = self.manager.active() else {
-            return false;
+            return self.manager.has_dirty_documents();
         };
         let doc = doc.read();
         if doc.mode() != EditorMode::Edit {
-            return false;
+            drop(doc);
+            return self.manager.has_dirty_documents();
         }
-        doc.is_dirty() || text_view_string(self.text_view) != self.last_presented_text
+        let active_dirty =
+            doc.is_dirty() || text_view_string(self.text_view) != self.last_presented_text;
+        drop(doc);
+        active_dirty || self.manager.has_dirty_documents()
     }
 
     unsafe fn save_active(&mut self) -> bool {
@@ -192,6 +228,8 @@ impl AppState {
             Ok(()) => {
                 self.last_presented_text = text_view_string(self.text_view);
                 set_status(self.status_field, &doc.status_line());
+                drop(doc);
+                self.refresh_tab_bar();
                 true
             }
             Err(error) => {
@@ -227,6 +265,8 @@ impl AppState {
                 self.last_presented_text = text_view_string(self.text_view);
                 set_window_title(self.window, &format!("{} - FastPad", doc.title()));
                 set_status(self.status_field, &doc.status_line());
+                drop(doc);
+                self.refresh_tab_bar();
                 true
             }
             Err(error) => {
@@ -234,6 +274,42 @@ impl AppState {
                 false
             }
         }
+    }
+
+    unsafe fn activate_next_tab(&mut self) {
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+        if self.manager.activate_next_tab() {
+            self.render_active_tab();
+        }
+    }
+
+    unsafe fn activate_previous_tab(&mut self) {
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+        if self.manager.activate_previous_tab() {
+            self.render_active_tab();
+        }
+    }
+
+    unsafe fn duplicate_active_tab(&mut self) {
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+        if self.manager.duplicate_active_tab().is_some() {
+            self.render_active_tab();
+        }
+    }
+
+    unsafe fn toggle_pin_active_tab(&mut self) {
+        self.manager.toggle_active_tab_pin();
+        self.refresh_tab_bar();
+    }
+
+    unsafe fn refresh_tab_bar(&self) {
+        set_tab_bar(self.tab_bar, &tab_bar_text(&self.manager.tab_summaries()));
     }
 
     unsafe fn save_copy_as(&mut self) -> bool {
@@ -278,7 +354,7 @@ impl AppState {
         let _: () = msg_send![alert, setMessageText: ns_string("Save changes before quitting?")];
         let _: () = msg_send![
             alert,
-            setInformativeText: ns_string("The active document has unsaved changes.")
+            setInformativeText: ns_string("One or more open tabs have unsaved changes.")
         ];
         let _: id = msg_send![alert, addButtonWithTitle: ns_string("Save")];
         let _: id = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
@@ -315,8 +391,13 @@ fn main() {
         let delegate_class = app_delegate_class();
         let delegate: id = msg_send![delegate_class, new];
 
-        let (window, text_view, status_field) = create_main_window();
-        let state = Box::into_raw(Box::new(AppState::new(window, text_view, status_field)));
+        let (window, tab_bar, text_view, status_field) = create_main_window();
+        let state = Box::into_raw(Box::new(AppState::new(
+            window,
+            tab_bar,
+            text_view,
+            status_field,
+        )));
         (*delegate).set_ivar("state", state as *mut c_void);
         app.setDelegate_(delegate);
 
@@ -338,6 +419,7 @@ fn main() {
                 status_field,
                 "No document open - View/Analysis Mode opens huge files read-only",
             );
+            set_tab_bar(tab_bar, "No tabs");
         } else {
             (*state).open_paths(paths);
         }
@@ -346,7 +428,7 @@ fn main() {
     }
 }
 
-unsafe fn create_main_window() -> (id, id, id) {
+unsafe fn create_main_window() -> (id, id, id, id) {
     let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(1080., 720.));
     let style = NSWindowStyleMask::NSTitledWindowMask
         | NSWindowStyleMask::NSClosableWindowMask
@@ -363,10 +445,18 @@ unsafe fn create_main_window() -> (id, id, id) {
 
     let content: id = window.contentView();
     let bounds: NSRect = msg_send![content, bounds];
+    let tab_height = 30.;
     let status_height = 28.;
+    let tab_frame = NSRect::new(
+        NSPoint::new(10., bounds.size.height - tab_height + 4.),
+        NSSize::new(bounds.size.width - 20., tab_height - 8.),
+    );
     let scroll_frame = NSRect::new(
         NSPoint::new(0., status_height),
-        NSSize::new(bounds.size.width, bounds.size.height - status_height),
+        NSSize::new(
+            bounds.size.width,
+            bounds.size.height - status_height - tab_height,
+        ),
     );
     let status_frame = NSRect::new(
         NSPoint::new(10., 4.),
@@ -379,6 +469,18 @@ unsafe fn create_main_window() -> (id, id, id) {
     let _: () = msg_send![scroll, setHasHorizontalScroller: YES];
     let _: () =
         msg_send![scroll, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+
+    let tab_bar: id = msg_send![class!(NSTextField), alloc];
+    let tab_bar: id = msg_send![tab_bar, initWithFrame: tab_frame];
+    let _: () = msg_send![tab_bar, setEditable: NO];
+    let _: () = msg_send![tab_bar, setSelectable: NO];
+    let _: () = msg_send![tab_bar, setBordered: NO];
+    let _: () = msg_send![tab_bar, setDrawsBackground: YES];
+    let tab_font: id = msg_send![class!(NSFont), systemFontOfSize: 12.0f64];
+    let _: () = msg_send![tab_bar, setFont: tab_font];
+    let _: () =
+        msg_send![tab_bar, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
+    content.addSubview_(tab_bar);
 
     let text_view: id = msg_send![class!(NSTextView), alloc];
     let text_view: id = msg_send![text_view, initWithFrame: scroll_frame];
@@ -403,7 +505,7 @@ unsafe fn create_main_window() -> (id, id, id) {
         msg_send![status_field, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
     content.addSubview_(status_field);
 
-    (window, text_view, status_field)
+    (window, tab_bar, text_view, status_field)
 }
 
 unsafe fn build_menu(app: id, delegate: id) {
@@ -584,10 +686,48 @@ unsafe fn build_menu(app: id, delegate: id) {
         plugins_menu.addItem_(disabled_menu_item(item));
     }
 
+    let tab_menu = add_menu(menubar, "Tab");
+    tab_menu.addItem_(menu_item("Next Tab", "]", sel!(nextTab:), delegate));
+    tab_menu.addItem_(menu_item("Previous Tab", "[", sel!(previousTab:), delegate));
+    tab_menu.addItem_(separator_item());
+    tab_menu.addItem_(menu_item(
+        "Duplicate Tab",
+        "",
+        sel!(duplicateTab:),
+        delegate,
+    ));
+    tab_menu.addItem_(menu_item(
+        "Pin/Unpin Tab",
+        "",
+        sel!(togglePinTab:),
+        delegate,
+    ));
+    tab_menu.addItem_(separator_item());
+    for item in [
+        "Close Current Tab",
+        "Close All Tabs",
+        "Close Other Tabs",
+        "Close Tabs to the Right",
+        "Reopen Recently Closed Tab",
+        "Move Tab to New Window",
+        "Split Tab Vertically",
+        "Split Tab Horizontally",
+        "Clone View of Same Document",
+        "Preview Tab",
+        "Tab Search",
+    ] {
+        tab_menu.addItem_(disabled_menu_item(item));
+    }
+
     let window_menu = add_menu(menubar, "Window");
     window_menu.addItem_(disabled_menu_item("New Window"));
-    window_menu.addItem_(disabled_menu_item("Next Document"));
-    window_menu.addItem_(disabled_menu_item("Previous Document"));
+    window_menu.addItem_(menu_item("Next Document", "", sel!(nextTab:), delegate));
+    window_menu.addItem_(menu_item(
+        "Previous Document",
+        "",
+        sel!(previousTab:),
+        delegate,
+    ));
 
     let help_menu = add_menu(menubar, "Help");
     help_menu.addItem_(placeholder_menu_item("About FastPad", "", delegate));
@@ -732,6 +872,10 @@ unsafe fn set_text_view(text_view: id, text: &str, editable: bool) {
     let _: () = msg_send![text_view, setEditable: if editable { YES } else { NO }];
 }
 
+unsafe fn set_tab_bar(tab_bar: id, text: &str) {
+    let _: () = msg_send![tab_bar, setStringValue: ns_string(text)];
+}
+
 unsafe fn set_status(status_field: id, text: &str) {
     let _: () = msg_send![status_field, setStringValue: ns_string(text)];
 }
@@ -795,6 +939,36 @@ unsafe fn nsstring_to_string(value: id) -> String {
     }
 }
 
+fn tab_bar_text(tabs: &[TabSummary]) -> String {
+    if tabs.is_empty() {
+        return "No tabs".to_string();
+    }
+    tabs.iter().map(tab_label).collect::<Vec<_>>().join("  |  ")
+}
+
+fn tab_label(tab: &TabSummary) -> String {
+    let icon = if tab.pinned { "📌" } else { "📄" };
+    let mut flags = String::new();
+    if tab.view_analysis {
+        flags.push_str(" 👁");
+    }
+    if tab.dirty {
+        flags.push_str(" *");
+    }
+    if tab.read_only {
+        flags.push_str(" RO");
+    }
+    if tab.external_modified {
+        flags.push_str(" !");
+    }
+    let label = format!("{icon} {}{flags}", tab.title);
+    if tab.active {
+        format!("[{label}]")
+    } else {
+        label
+    }
+}
+
 fn app_delegate_class() -> *const Class {
     static REGISTER: Once = Once::new();
     static mut CLASS: *const Class = ptr::null();
@@ -825,6 +999,19 @@ fn app_delegate_class() -> *const Class {
         decl.add_method(
             sel!(pageDownDocument:),
             page_down_document as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(sel!(nextTab:), next_tab as extern "C" fn(&Object, Sel, id));
+        decl.add_method(
+            sel!(previousTab:),
+            previous_tab as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(duplicateTab:),
+            duplicate_tab as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(togglePinTab:),
+            toggle_pin_tab as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
             sel!(showNotImplemented:),
@@ -901,6 +1088,38 @@ extern "C" fn page_down_document(this: &Object, _: Sel, _: id) {
     unsafe {
         if let Some(state) = state_from_delegate(this) {
             state.page_down();
+        }
+    }
+}
+
+extern "C" fn next_tab(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.activate_next_tab();
+        }
+    }
+}
+
+extern "C" fn previous_tab(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.activate_previous_tab();
+        }
+    }
+}
+
+extern "C" fn duplicate_tab(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.duplicate_active_tab();
+        }
+    }
+}
+
+extern "C" fn toggle_pin_tab(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.toggle_pin_active_tab();
         }
     }
 }

@@ -9,6 +9,8 @@ This MVP maps the supplied specs to implemented repository components.
 - `APP-003`: Finder Open With events are routed through the app delegate.
 - `APP-006`: quit prompts before terminating when the active document has unsaved changes.
 - `APP-008`: native macOS menu bar exists with Notepad++-style File/Edit/Search/View/Encoding/Language/Settings/Tools sections plus visible Macro/Run/Plugins placeholders.
+- `MDI-001`: single-window tabs are the default document surface; tabs reference shared documents through independent view state.
+- `MDI-002`: opening an already-open path creates a new lightweight tab without reloading the underlying document.
 - `FILE-001` to `FILE-005`, `FILE-009`, `FILE-010`: represented by `fastpad_file`.
 - `LINE-001` to `LINE-006`: represented by `fastpad_line_index`.
 - `VIEW-001` to `VIEW-006`: represented by `fastpad_viewport` and the AppKit `Page Down` command.
@@ -26,7 +28,7 @@ This MVP maps the supplied specs to implemented repository components.
 - Filter/pipeline builder.
 - File intelligence side panel.
 - Full implementation behind disabled Notepad++-style menu items.
-- Multiple independent windows and tabs.
+- Multiple independent windows, drag/drop tab reordering, split views, and session restore.
 - Bookmarks, notes, and inspectors.
 - Tail-follow controls.
 - Performance dashboard.

@@ -11,7 +11,8 @@ The current repository is an MVP implementation scaffolded from the supplied SRS
 
 - Native AppKit macOS window, menu bar, `Open...`, `Save`, and `Page Down`.
 - Notepad++-style menu categories are visible, including Macro, Run, and Plugins placeholders; unfinished commands are disabled until their engines/UI are implemented.
-- `Save As...`, `Save a Copy As...`, multi-file open, Finder Open With, and quit prompts for the active unsaved document.
+- Single-window multi-tab shell with shared documents, lightweight per-tab view state, tab switching, duplicate tab, and pin indicators.
+- `Save As...`, `Save a Copy As...`, multi-file open, Finder Open With, existing-window file routing, and quit prompts for unsaved documents.
 - Automatic mode selection based on file size/risk.
 - Read-only mmap/chunk file engine with bounded byte-range reads.
 - Lazy line index and visible-only viewport extraction.
@@ -63,7 +64,7 @@ scripts/run_macos_app.sh
 ## Project Layout
 
 - `crates/fastpad_app_macos`: AppKit application shell.
-- `crates/fastpad_core`: document manager, mode manager, command capabilities.
+- `crates/fastpad_core`: document/tab/view manager, mode manager, command capabilities.
 - `crates/fastpad_file`: mmap/chunked file access, file intelligence, atomic write.
 - `crates/fastpad_line_index`: lazy line boundary discovery.
 - `crates/fastpad_viewport`: less/more-style visible region model.

@@ -370,21 +370,155 @@ impl Document {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DocumentId(pub u64);
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WindowId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TabId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ViewId(pub u64);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentViewState {
+    pub anchor: ViewAnchor,
+    pub next_anchor: Option<ViewAnchor>,
+    pub cursor_offset: fastpad_file::ByteOffset,
+    pub scroll_offset: fastpad_file::ByteOffset,
+    pub zoom_level: f32,
+    pub fold_state: Vec<fastpad_file::ByteRange>,
+    pub bookmarks: Vec<fastpad_file::ByteOffset>,
+    pub search_history: Vec<String>,
+    pub active_filters: Vec<String>,
+}
+
+impl Default for DocumentViewState {
+    fn default() -> Self {
+        Self {
+            anchor: ViewAnchor::Start,
+            next_anchor: None,
+            cursor_offset: fastpad_file::ByteOffset::ZERO,
+            scroll_offset: fastpad_file::ByteOffset::ZERO,
+            zoom_level: 1.0,
+            fold_state: Vec::new(),
+            bookmarks: Vec::new(),
+            search_history: Vec::new(),
+            active_filters: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tab {
+    id: TabId,
+    document_id: DocumentId,
+    view_id: ViewId,
+    view: DocumentViewState,
+    pinned: bool,
+    preview: bool,
+    external_modified: bool,
+}
+
+impl Tab {
+    pub fn id(&self) -> TabId {
+        self.id
+    }
+
+    pub fn document_id(&self) -> DocumentId {
+        self.document_id
+    }
+
+    pub fn view_id(&self) -> ViewId {
+        self.view_id
+    }
+
+    pub fn view(&self) -> &DocumentViewState {
+        &self.view
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    pub fn is_preview(&self) -> bool {
+        self.preview
+    }
+
+    pub fn is_external_modified(&self) -> bool {
+        self.external_modified
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowState {
+    id: WindowId,
+    tabs: Vec<TabId>,
+    active_tab: Option<TabId>,
+}
+
+impl WindowState {
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
+
+    pub fn tabs(&self) -> &[TabId] {
+        &self.tabs
+    }
+
+    pub fn active_tab(&self) -> Option<TabId> {
+        self.active_tab
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TabSummary {
+    pub id: TabId,
+    pub view_id: ViewId,
+    pub document_id: DocumentId,
+    pub title: String,
+    pub dirty: bool,
+    pub read_only: bool,
+    pub view_analysis: bool,
+    pub external_modified: bool,
+    pub pinned: bool,
+    pub preview: bool,
+    pub active: bool,
+}
+
 pub struct DocumentManager {
     settings: AppSettings,
-    next_id: u64,
+    next_document_id: u64,
+    next_tab_id: u64,
+    next_view_id: u64,
     documents: BTreeMap<DocumentId, Arc<RwLock<Document>>>,
-    active: Option<DocumentId>,
+    tabs: BTreeMap<TabId, Tab>,
+    path_index: BTreeMap<PathBuf, DocumentId>,
+    windows: BTreeMap<WindowId, WindowState>,
+    active_window: WindowId,
 }
 
 impl DocumentManager {
     pub fn new(settings: AppSettings) -> Self {
+        let active_window = WindowId(1);
+        let mut windows = BTreeMap::new();
+        windows.insert(
+            active_window,
+            WindowState {
+                id: active_window,
+                tabs: Vec::new(),
+                active_tab: None,
+            },
+        );
         Self {
             settings,
-            next_id: 1,
+            next_document_id: 1,
+            next_tab_id: 1,
+            next_view_id: 1,
             documents: BTreeMap::new(),
-            active: None,
+            tabs: BTreeMap::new(),
+            path_index: BTreeMap::new(),
+            windows,
+            active_window,
         }
     }
 
@@ -393,19 +527,44 @@ impl DocumentManager {
     }
 
     pub fn open(&mut self, path: impl AsRef<Path>, intent: OpenIntent) -> Result<DocumentId> {
-        let id = self.allocate_id();
-        let doc = Document::open(id, path, &self.settings, intent)?;
-        self.documents.insert(id, Arc::new(RwLock::new(doc)));
-        self.active = Some(id);
-        Ok(id)
+        let tab_id = self.open_tab(path, intent)?;
+        Ok(self
+            .tabs
+            .get(&tab_id)
+            .expect("newly opened tab exists")
+            .document_id)
+    }
+
+    pub fn open_tab(&mut self, path: impl AsRef<Path>, intent: OpenIntent) -> Result<TabId> {
+        let document_id = self.document_id_for_path(path.as_ref(), intent)?;
+        Ok(self.create_tab_for_document(document_id))
     }
 
     pub fn new_untitled(&mut self) -> DocumentId {
-        let id = self.allocate_id();
+        let tab_id = self.new_untitled_tab();
+        self.tabs
+            .get(&tab_id)
+            .expect("newly created tab exists")
+            .document_id
+    }
+
+    pub fn new_untitled_tab(&mut self) -> TabId {
+        let id = self.allocate_document_id();
         let doc = Document::untitled(id);
         self.documents.insert(id, Arc::new(RwLock::new(doc)));
-        self.active = Some(id);
-        id
+        self.create_tab_for_document(id)
+    }
+
+    pub fn duplicate_active_tab(&mut self) -> Option<TabId> {
+        let document_id = self.active_tab().map(|tab| tab.document_id)?;
+        Some(self.create_tab_for_document(document_id))
+    }
+
+    pub fn toggle_active_tab_pin(&mut self) -> Option<bool> {
+        let tab_id = self.active_tab_id()?;
+        let tab = self.tabs.get_mut(&tab_id)?;
+        tab.pinned = !tab.pinned;
+        Some(tab.pinned)
     }
 
     pub fn get(&self, id: DocumentId) -> Option<Arc<RwLock<Document>>> {
@@ -413,14 +572,191 @@ impl DocumentManager {
     }
 
     pub fn active(&self) -> Option<Arc<RwLock<Document>>> {
-        self.active.and_then(|id| self.get(id))
+        self.active_tab().and_then(|tab| self.get(tab.document_id))
     }
 
-    fn allocate_id(&mut self) -> DocumentId {
-        let id = DocumentId(self.next_id);
-        self.next_id += 1;
+    pub fn active_document_id(&self) -> Option<DocumentId> {
+        self.active_tab().map(|tab| tab.document_id)
+    }
+
+    pub fn active_tab_id(&self) -> Option<TabId> {
+        self.windows
+            .get(&self.active_window)
+            .and_then(|window| window.active_tab)
+    }
+
+    pub fn active_view_state(&self) -> Option<DocumentViewState> {
+        self.active_tab().map(|tab| tab.view.clone())
+    }
+
+    pub fn update_active_view_state(
+        &mut self,
+        update: impl FnOnce(&mut DocumentViewState),
+    ) -> bool {
+        let Some(tab_id) = self.active_tab_id() else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return false;
+        };
+        update(&mut tab.view);
+        true
+    }
+
+    pub fn set_active_tab(&mut self, tab_id: TabId) -> bool {
+        if !self.tabs.contains_key(&tab_id) {
+            return false;
+        }
+        let Some(window) = self.windows.get_mut(&self.active_window) else {
+            return false;
+        };
+        if !window.tabs.contains(&tab_id) {
+            return false;
+        }
+        window.active_tab = Some(tab_id);
+        true
+    }
+
+    pub fn activate_next_tab(&mut self) -> bool {
+        self.activate_relative_tab(1)
+    }
+
+    pub fn activate_previous_tab(&mut self) -> bool {
+        self.activate_relative_tab(-1)
+    }
+
+    pub fn tab_summaries(&self) -> Vec<TabSummary> {
+        let Some(window) = self.windows.get(&self.active_window) else {
+            return Vec::new();
+        };
+        window
+            .tabs
+            .iter()
+            .filter_map(|tab_id| self.tab_summary(*tab_id))
+            .collect()
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    pub fn document_count(&self) -> usize {
+        self.documents.len()
+    }
+
+    pub fn has_dirty_documents(&self) -> bool {
+        self.documents
+            .values()
+            .any(|document| document.read().is_dirty())
+    }
+
+    fn document_id_for_path(&mut self, path: &Path, intent: OpenIntent) -> Result<DocumentId> {
+        let index_path = normalized_path(path);
+        if let Some(id) = self.path_index.get(&index_path).copied() {
+            if self.documents.contains_key(&id) {
+                return Ok(id);
+            }
+        }
+
+        let id = self.allocate_document_id();
+        let doc = Document::open(id, path, &self.settings, intent)?;
+        if let Some(path) = doc.path() {
+            self.path_index.insert(normalized_path(path), id);
+        }
+        self.documents.insert(id, Arc::new(RwLock::new(doc)));
+        Ok(id)
+    }
+
+    fn create_tab_for_document(&mut self, document_id: DocumentId) -> TabId {
+        let tab_id = self.allocate_tab_id();
+        let view_id = self.allocate_view_id();
+        self.tabs.insert(
+            tab_id,
+            Tab {
+                id: tab_id,
+                document_id,
+                view_id,
+                view: DocumentViewState::default(),
+                pinned: false,
+                preview: false,
+                external_modified: false,
+            },
+        );
+        let window = self
+            .windows
+            .get_mut(&self.active_window)
+            .expect("active window exists");
+        window.tabs.push(tab_id);
+        window.active_tab = Some(tab_id);
+        tab_id
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.active_tab_id().and_then(|id| self.tabs.get(&id))
+    }
+
+    fn activate_relative_tab(&mut self, delta: isize) -> bool {
+        let Some(window) = self.windows.get_mut(&self.active_window) else {
+            return false;
+        };
+        if window.tabs.is_empty() {
+            return false;
+        }
+        let current = window.active_tab.unwrap_or(window.tabs[0]);
+        let current_idx = window
+            .tabs
+            .iter()
+            .position(|tab_id| *tab_id == current)
+            .unwrap_or(0);
+        let len = window.tabs.len() as isize;
+        let next_idx = (current_idx as isize + delta).rem_euclid(len) as usize;
+        window.active_tab = Some(window.tabs[next_idx]);
+        true
+    }
+
+    fn tab_summary(&self, tab_id: TabId) -> Option<TabSummary> {
+        let tab = self.tabs.get(&tab_id)?;
+        let document = self.documents.get(&tab.document_id)?.read();
+        let read_only = document
+            .metadata()
+            .map(|metadata| metadata.readonly)
+            .unwrap_or(false);
+        Some(TabSummary {
+            id: tab.id,
+            view_id: tab.view_id,
+            document_id: tab.document_id,
+            title: document.title().to_string(),
+            dirty: document.is_dirty(),
+            read_only,
+            view_analysis: document.mode() == EditorMode::ViewAnalysis,
+            external_modified: tab.external_modified,
+            pinned: tab.pinned,
+            preview: tab.preview,
+            active: self.active_tab_id() == Some(tab.id),
+        })
+    }
+
+    fn allocate_document_id(&mut self) -> DocumentId {
+        let id = DocumentId(self.next_document_id);
+        self.next_document_id += 1;
         id
     }
+
+    fn allocate_tab_id(&mut self) -> TabId {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        id
+    }
+
+    fn allocate_view_id(&mut self) -> ViewId {
+        let id = ViewId(self.next_view_id);
+        self.next_view_id += 1;
+        id
+    }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -528,5 +864,78 @@ mod tests {
         assert!(!doc.is_dirty());
         assert!(doc.has_save_path());
         assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "hello");
+    }
+
+    #[test]
+    fn opening_same_path_creates_lightweight_tabs_sharing_document() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "shared").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let first_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
+        let second_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
+
+        assert_ne!(first_tab, second_tab);
+        assert_eq!(manager.tab_count(), 2);
+        assert_eq!(manager.document_count(), 1);
+
+        let summaries = manager.tab_summaries();
+        assert_eq!(summaries[0].document_id, summaries[1].document_id);
+        assert_ne!(summaries[0].view_id, summaries[1].view_id);
+        assert!(summaries[1].active);
+    }
+
+    #[test]
+    fn duplicated_tab_shares_document_but_keeps_independent_view_state() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "line 1").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+        let first_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
+        manager.update_active_view_state(|view| {
+            view.anchor = ViewAnchor::Byte(fastpad_file::ByteOffset(128));
+        });
+
+        let second_tab = manager.duplicate_active_tab().unwrap();
+        manager.update_active_view_state(|view| {
+            view.anchor = ViewAnchor::Byte(fastpad_file::ByteOffset(256));
+        });
+
+        let summaries = manager.tab_summaries();
+        assert_eq!(manager.document_count(), 1);
+        assert_eq!(summaries[0].document_id, summaries[1].document_id);
+        assert_ne!(summaries[0].view_id, summaries[1].view_id);
+
+        manager.set_active_tab(first_tab);
+        assert_eq!(
+            manager.active_view_state().unwrap().anchor,
+            ViewAnchor::Byte(fastpad_file::ByteOffset(128))
+        );
+        manager.set_active_tab(second_tab);
+        assert_eq!(
+            manager.active_view_state().unwrap().anchor,
+            ViewAnchor::Byte(fastpad_file::ByteOffset(256))
+        );
+    }
+
+    #[test]
+    fn next_previous_tab_switching_updates_active_document() {
+        let mut first = tempfile::NamedTempFile::new().unwrap();
+        let mut second = tempfile::NamedTempFile::new().unwrap();
+        writeln!(first, "first").unwrap();
+        writeln!(second, "second").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let first_tab = manager
+            .open_tab(first.path(), OpenIntent::default())
+            .unwrap();
+        let second_tab = manager
+            .open_tab(second.path(), OpenIntent::default())
+            .unwrap();
+
+        assert_eq!(manager.active_tab_id(), Some(second_tab));
+        assert!(manager.activate_previous_tab());
+        assert_eq!(manager.active_tab_id(), Some(first_tab));
+        assert!(manager.activate_next_tab());
+        assert_eq!(manager.active_tab_id(), Some(second_tab));
     }
 }

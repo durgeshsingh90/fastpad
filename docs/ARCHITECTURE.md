@@ -15,6 +15,14 @@ Large, binary-looking, or risky files enter `ViewAnalysis` by default. Edit comm
 
 `fastpad_file::FileHandle::open` reads metadata and a small sample. It may create a read-only mmap, but all public reads are byte-range bounded. `read_entire_if_under` is only used by Edit Mode after threshold checks.
 
+## Multi-Document Model
+
+FastPad treats tabs as lightweight views over shared documents:
+
+`Application -> Window -> Tab -> View -> Document -> Text Buffer`
+
+`fastpad_core::DocumentManager` owns documents once, indexes open file paths, and creates tabs with independent `DocumentViewState` values. Opening an already-open path creates another tab referencing the existing `DocumentId`; it does not reload the file or duplicate the text buffer. This supports future split views, compare views, and multi-window document sharing without changing the storage model.
+
 ## Viewports and Line Indexing
 
 `fastpad_line_index::LazyLineIndex` keeps a contiguous line-start index only for regions that need line-number mapping. Byte-offset and percentage navigation do not force a full scan; they discover a nearby line start with bounded backtracking.
@@ -35,9 +43,10 @@ Large, binary-looking, or risky files enter `ViewAnalysis` by default. Edit comm
 
 `fastpad_app_macos` uses AppKit directly from Rust through `cocoa`/`objc`. The app shell owns native windows, menus, open/save actions, and translates UI commands into core document operations.
 
+The current shell presents a single primary window with a lightweight tab strip. Finder/start-script file opens route into the existing app instance by default, and tab switching/duplication/pinning are wired through native menu commands.
+
 ## Current MVP Limits
 
 - The AppKit shell uses `NSTextView` as the initial UI surface. View/Analysis Mode pages through bounded viewports instead of implementing a custom virtual renderer.
 - Search and pipeline engines are available in core crates, but the first AppKit shell does not yet expose full search/filter panels.
-- Save-as, session restore, syntax highlighting, block selection, bookmarks, and performance dashboards are future work.
-
+- Drag-and-drop tab reordering, split views, multiple windows, recently closed tabs, session restore, syntax highlighting, block selection, bookmarks, and performance dashboards are future work.
