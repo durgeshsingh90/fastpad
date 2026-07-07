@@ -1,0 +1,21 @@
+[package]
+name = "fastpad_core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fastpad_edit = { path = "../fastpad_edit" }
+fastpad_file = { path = "../fastpad_file" }
+fastpad_line_index = { path = "../fastpad_line_index" }
+fastpad_search = { path = "../fastpad_search" }
+fastpad_tasks = { path = "../fastpad_tasks" }
+fastpad_viewport = { path = "../fastpad_viewport" }
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

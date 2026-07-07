@@ -1,0 +1,4 @@
+2026-07-07T20:55:01Z INFO boot FastPad sample log
+2026-07-07T20:55:02Z WARN slow request id=42 elapsed_ms=811
+2026-07-07T20:55:03Z ERROR failed request id=43 status=500
+2026-07-07T20:55:04Z INFO shutdown complete

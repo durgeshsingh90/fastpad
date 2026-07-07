@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/fastpad_app_macos",
+    "crates/fastpad_core",
+    "crates/fastpad_file",
+    "crates/fastpad_line_index",
+    "crates/fastpad_viewport",
+    "crates/fastpad_render",
+    "crates/fastpad_search",
+    "crates/fastpad_tail",
+    "crates/fastpad_pipeline",
+    "crates/fastpad_edit",
+    "crates/fastpad_replace",
+    "crates/fastpad_tasks",
+    "crates/fastpad_diagnostics",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["FastPad contributors"]
+repository = "https://github.com/durgeshsingh90/MacNotepad"
+
+[workspace.dependencies]
+anyhow = "1.0"
+bitflags = "2.6"
+cocoa = "0.25"
+core-graphics = "0.23"
+crossbeam-channel = "0.5"
+libc = "0.2"
+memchr = "2.7"
+memmap2 = "0.9"
+objc = "0.2"
+parking_lot = "0.12"
+regex = "1.11"
+ropey = "1.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.12"
+thiserror = "2.0"
+tracing = "0.1"

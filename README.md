@@ -1,1 +1,80 @@
-# MacNotepad-
+# FastPad
+
+FastPad is a native macOS text editor written in Rust. The project is optimized around two explicit modes:
+
+- **View/Analysis Mode** for huge read-only files, log inspection, search, filtering, and byte-offset navigation.
+- **Edit Mode** for normal editing with a rope buffer, undo/redo, replace, and atomic save.
+
+The current repository is an MVP implementation scaffolded from the supplied SRS and Unix-style engineering blueprint. It intentionally prioritizes the invariants that matter for large files: bounded reads, lazy line indexing, cancellable long-running work, and native macOS shell integration.
+
+## What Works Now
+
+- Native AppKit macOS window, menu bar, `Open...`, `Save`, and `Page Down`.
+- Automatic mode selection based on file size/risk.
+- Read-only mmap/chunk file engine with bounded byte-range reads.
+- Lazy line index and visible-only viewport extraction.
+- Grep-style literal/regex search with cancellation and bounded results.
+- Rope-based Edit Mode buffer with undo/redo transactions.
+- Regex/literal replace-all as one undoable edit transaction.
+- Non-destructive streaming pipeline preview stages: contains, regex, field extraction, and head.
+- Tail-follow state for growing files.
+- Diagnostics structs for open/search/render budgets.
+
+## Build
+
+Install Rust if needed:
+
+```sh
+brew install rust
+```
+
+Run tests:
+
+```sh
+cargo test
+```
+
+Run the macOS app directly:
+
+```sh
+cargo run -p fastpad_app_macos --bin FastPad
+```
+
+Open a file at launch:
+
+```sh
+cargo run -p fastpad_app_macos --bin FastPad -- /path/to/file.log
+```
+
+Create and run a minimal `.app` bundle:
+
+```sh
+scripts/run_macos_app.sh
+```
+
+## Project Layout
+
+- `crates/fastpad_app_macos`: AppKit application shell.
+- `crates/fastpad_core`: document manager, mode manager, command capabilities.
+- `crates/fastpad_file`: mmap/chunked file access, file intelligence, atomic write.
+- `crates/fastpad_line_index`: lazy line boundary discovery.
+- `crates/fastpad_viewport`: less/more-style visible region model.
+- `crates/fastpad_search`: grep-style streaming search.
+- `crates/fastpad_pipeline`: non-destructive filter/extract/count previews.
+- `crates/fastpad_edit`: rope edit buffer and undo/redo.
+- `crates/fastpad_replace`: sed-like replace operations for Edit Mode.
+- `crates/fastpad_tail`: tail-follow state.
+- `crates/fastpad_render`: render plan model for visible lines and overlays.
+- `crates/fastpad_tasks`: cancellation and background task handles.
+- `crates/fastpad_diagnostics`: performance budget structs and timers.
+
+## Non-Negotiable Invariants
+
+- Do not load huge files into a `String`.
+- Do not build a full line index before first render.
+- Do not block the UI thread for scanning, searching, indexing, or parsing.
+- Do not expose destructive editing commands in View/Analysis Mode.
+- Use byte offsets for large-file references.
+- Emit progressive results for long operations.
+- Every long-running operation must have a cancellation token.
+

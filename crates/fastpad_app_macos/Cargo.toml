@@ -1,0 +1,19 @@
+[package]
+name = "fastpad_app_macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "FastPad"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+cocoa.workspace = true
+core-graphics.workspace = true
+fastpad_core = { path = "../fastpad_core" }
+fastpad_viewport = { path = "../fastpad_viewport" }
+libc.workspace = true
+objc.workspace = true

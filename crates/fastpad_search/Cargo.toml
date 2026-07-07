@@ -1,0 +1,17 @@
+[package]
+name = "fastpad_search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fastpad_file = { path = "../fastpad_file" }
+fastpad_tasks = { path = "../fastpad_tasks" }
+memchr.workspace = true
+regex.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

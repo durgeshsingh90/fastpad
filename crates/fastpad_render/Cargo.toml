@@ -1,0 +1,10 @@
+[package]
+name = "fastpad_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fastpad_viewport = { path = "../fastpad_viewport" }
+serde.workspace = true

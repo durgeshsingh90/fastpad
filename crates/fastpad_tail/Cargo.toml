@@ -1,0 +1,14 @@
+[package]
+name = "fastpad_tail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+fastpad_file = { path = "../fastpad_file" }
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
