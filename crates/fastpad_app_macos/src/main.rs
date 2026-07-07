@@ -77,6 +77,17 @@ impl AppState {
         }
     }
 
+    unsafe fn new_document(&mut self) {
+        let id = self.manager.new_untitled();
+        if let Some(doc) = self.manager.get(id) {
+            let doc = doc.read();
+            self.next_anchor = None;
+            set_text_view(self.text_view, "", true);
+            set_window_title(self.window, "Untitled - FastPad");
+            set_status(self.status_field, &doc.status_line());
+        }
+    }
+
     unsafe fn page_down(&mut self) {
         let Some(anchor) = self.next_anchor else {
             return;
@@ -130,6 +141,13 @@ impl AppState {
             Ok(()) => set_status(self.status_field, &doc.status_line()),
             Err(error) => self.show_error(&format!("Save failed: {error:#}")),
         }
+    }
+
+    unsafe fn show_not_implemented(&self) {
+        set_status(
+            self.status_field,
+            "This Notepad++-style command is visible for parity but is not implemented yet.",
+        );
     }
 
     unsafe fn show_error(&self, message: &str) {
@@ -244,27 +262,237 @@ unsafe fn build_menu(app: id, delegate: id) {
     app_menu_item.setSubmenu_(app_menu);
     app_menu.addItem_(menu_item("Quit FastPad", "q", sel!(terminate:), nil));
 
-    let file_menu_item = NSMenuItem::new(nil).autorelease();
-    menubar.addItem_(file_menu_item);
-    let file_menu = NSMenu::alloc(nil)
-        .initWithTitle_(ns_string("File"))
-        .autorelease();
-    file_menu_item.setSubmenu_(file_menu);
+    let file_menu = add_menu(menubar, "File");
+    file_menu.addItem_(menu_item("New", "n", sel!(newDocument:), delegate));
     file_menu.addItem_(menu_item("Open...", "o", sel!(openDocument:), delegate));
+    file_menu.addItem_(disabled_menu_item("Open Containing Folder"));
+    file_menu.addItem_(disabled_menu_item("Open Folder as Workspace"));
+    file_menu.addItem_(disabled_menu_item("Reload from Disk"));
+    file_menu.addItem_(separator_item());
     file_menu.addItem_(menu_item("Save", "s", sel!(saveDocument:), delegate));
+    file_menu.addItem_(disabled_menu_item("Save As..."));
+    file_menu.addItem_(disabled_menu_item("Save a Copy As..."));
+    file_menu.addItem_(disabled_menu_item("Save All"));
+    file_menu.addItem_(disabled_menu_item("Rename..."));
+    file_menu.addItem_(separator_item());
+    file_menu.addItem_(disabled_menu_item("Close"));
+    file_menu.addItem_(disabled_menu_item("Close All"));
+    file_menu.addItem_(disabled_menu_item("Close All But Current"));
+    file_menu.addItem_(disabled_menu_item("Delete from Disk"));
+    file_menu.addItem_(separator_item());
+    file_menu.addItem_(disabled_menu_item("Load Session..."));
+    file_menu.addItem_(disabled_menu_item("Save Session..."));
+    file_menu.addItem_(disabled_menu_item("Print..."));
 
-    let nav_menu_item = NSMenuItem::new(nil).autorelease();
-    menubar.addItem_(nav_menu_item);
-    let nav_menu = NSMenu::alloc(nil)
-        .initWithTitle_(ns_string("Navigate"))
-        .autorelease();
-    nav_menu_item.setSubmenu_(nav_menu);
-    nav_menu.addItem_(menu_item(
+    let edit_menu = add_menu(menubar, "Edit");
+    edit_menu.addItem_(menu_item("Undo", "z", sel!(undo:), nil));
+    edit_menu.addItem_(menu_item("Redo", "Z", sel!(redo:), nil));
+    edit_menu.addItem_(separator_item());
+    edit_menu.addItem_(menu_item("Cut", "x", sel!(cut:), nil));
+    edit_menu.addItem_(menu_item("Copy", "c", sel!(copy:), nil));
+    edit_menu.addItem_(menu_item("Paste", "v", sel!(paste:), nil));
+    edit_menu.addItem_(menu_item("Delete", "", sel!(delete:), nil));
+    edit_menu.addItem_(menu_item("Select All", "a", sel!(selectAll:), nil));
+    edit_menu.addItem_(separator_item());
+    edit_menu.addItem_(disabled_menu_item("Begin/End Select"));
+    edit_menu.addItem_(disabled_menu_item("Column Mode"));
+    edit_menu.addItem_(disabled_menu_item("Multi-Editing"));
+    edit_menu.addItem_(disabled_menu_item("Line Operations"));
+    edit_menu.addItem_(disabled_menu_item("Blank Operations"));
+    edit_menu.addItem_(disabled_menu_item("Case Conversion"));
+    edit_menu.addItem_(disabled_menu_item("Comment/Uncomment"));
+    edit_menu.addItem_(disabled_menu_item("Auto-completion"));
+    edit_menu.addItem_(disabled_menu_item("Parameter Hint"));
+
+    let search_menu = add_menu(menubar, "Search");
+    search_menu.addItem_(placeholder_menu_item("Find...", "f", delegate));
+    search_menu.addItem_(placeholder_menu_item("Find Next", "g", delegate));
+    search_menu.addItem_(placeholder_menu_item("Find Previous", "G", delegate));
+    search_menu.addItem_(placeholder_menu_item("Replace...", "h", delegate));
+    search_menu.addItem_(disabled_menu_item("Find in Files..."));
+    search_menu.addItem_(disabled_menu_item("Find in Projects..."));
+    search_menu.addItem_(disabled_menu_item("Incremental Search"));
+    search_menu.addItem_(disabled_menu_item("Mark..."));
+    search_menu.addItem_(disabled_menu_item("Bookmark"));
+    search_menu.addItem_(disabled_menu_item("Go To..."));
+    search_menu.addItem_(disabled_menu_item("Search Results Window"));
+
+    let view_menu = add_menu(menubar, "View");
+    view_menu.addItem_(disabled_menu_item("Always on Top"));
+    view_menu.addItem_(disabled_menu_item("Word Wrap"));
+    view_menu.addItem_(disabled_menu_item("Show Symbol"));
+    view_menu.addItem_(disabled_menu_item("Zoom"));
+    view_menu.addItem_(separator_item());
+    view_menu.addItem_(menu_item(
         "Page Down",
         " ",
         sel!(pageDownDocument:),
         delegate,
     ));
+    view_menu.addItem_(disabled_menu_item("Move/Clone Current Document"));
+    view_menu.addItem_(disabled_menu_item("Tab Bar"));
+    view_menu.addItem_(disabled_menu_item("Status Bar"));
+    view_menu.addItem_(disabled_menu_item("Toolbar"));
+    view_menu.addItem_(disabled_menu_item("Document Map"));
+    view_menu.addItem_(disabled_menu_item("Function List"));
+    view_menu.addItem_(disabled_menu_item("Folder as Workspace"));
+    view_menu.addItem_(disabled_menu_item("Project Panels"));
+    view_menu.addItem_(disabled_menu_item("Monitoring"));
+
+    let encoding_menu = add_menu(menubar, "Encoding");
+    for item in [
+        "ANSI",
+        "UTF-8",
+        "UTF-8 BOM",
+        "UTF-16 LE",
+        "UTF-16 BE",
+        "Character Sets",
+        "Convert Encoding",
+    ] {
+        encoding_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let language_menu = add_menu(menubar, "Language");
+    add_language_items(language_menu);
+
+    let settings_menu = add_menu(menubar, "Settings");
+    for item in [
+        "Preferences...",
+        "Style Configurator...",
+        "Shortcut Mapper...",
+        "Import...",
+        "Export...",
+        "Cloud Settings",
+    ] {
+        settings_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let tools_menu = add_menu(menubar, "Tools");
+    for item in [
+        "Macros",
+        "Run Command...",
+        "Plugin Admin...",
+        "Plugins",
+        "MD5",
+        "SHA Tools",
+        "Compare",
+        "XML Tools",
+        "JSON Tools",
+    ] {
+        tools_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let window_menu = add_menu(menubar, "Window");
+    window_menu.addItem_(disabled_menu_item("New Window"));
+    window_menu.addItem_(disabled_menu_item("Next Document"));
+    window_menu.addItem_(disabled_menu_item("Previous Document"));
+
+    let help_menu = add_menu(menubar, "Help");
+    help_menu.addItem_(placeholder_menu_item("About FastPad", "", delegate));
+}
+
+unsafe fn add_menu(menubar: id, title: &str) -> id {
+    let menu_item = NSMenuItem::new(nil).autorelease();
+    menubar.addItem_(menu_item);
+    let menu = NSMenu::alloc(nil)
+        .initWithTitle_(ns_string(title))
+        .autorelease();
+    menu_item.setSubmenu_(menu);
+    menu
+}
+
+unsafe fn add_language_items(language_menu: id) {
+    let languages = [
+        "Plain Text",
+        "ActionScript",
+        "Ada",
+        "ASN.1",
+        "ASP",
+        "Assembly",
+        "AutoIt",
+        "AviSynth",
+        "BaanC",
+        "Batch",
+        "BlitzBasic",
+        "C",
+        "C#",
+        "C++",
+        "Caml",
+        "CMake",
+        "COBOL",
+        "CoffeeScript",
+        "Csound",
+        "CSS",
+        "D",
+        "Diff",
+        "Dockerfile",
+        "Erlang",
+        "Forth",
+        "Fortran",
+        "FreeBasic",
+        "Go",
+        "GraphQL",
+        "Groovy",
+        "Haskell",
+        "HCL",
+        "HTML",
+        "INI",
+        "Intel HEX",
+        "Inno Setup",
+        "Java",
+        "JavaScript",
+        "JSON",
+        "JSON5",
+        "JSP",
+        "Kotlin",
+        "LaTeX",
+        "Lisp",
+        "Lua",
+        "Makefile",
+        "Markdown",
+        "MATLAB",
+        "Nim",
+        "NSIS",
+        "Objective-C",
+        "OCaml",
+        "Pascal",
+        "Perl",
+        "PHP",
+        "PostScript",
+        "PowerShell",
+        "Properties",
+        "Protocol Buffers",
+        "Python",
+        "R",
+        "Registry",
+        "Resource Script",
+        "Ruby",
+        "Rust",
+        "Scala",
+        "Scheme",
+        "Shell Script",
+        "Smalltalk",
+        "SPICE",
+        "SQL",
+        "Swift",
+        "Tcl",
+        "Terraform",
+        "TeX",
+        "TOML",
+        "TypeScript",
+        "Visual Basic",
+        "Verilog",
+        "VHDL",
+        "Vue",
+        "XML",
+        "YAML",
+        "Zig",
+        "User Defined Language",
+    ];
+
+    for language in languages {
+        language_menu.addItem_(disabled_menu_item(language));
+    }
 }
 
 unsafe fn menu_item(title: &str, key: &str, action: Sel, target: id) -> id {
@@ -275,6 +503,20 @@ unsafe fn menu_item(title: &str, key: &str, action: Sel, target: id) -> id {
         item.setTarget_(target);
     }
     item
+}
+
+unsafe fn placeholder_menu_item(title: &str, key: &str, target: id) -> id {
+    menu_item(title, key, sel!(showNotImplemented:), target)
+}
+
+unsafe fn disabled_menu_item(title: &str) -> id {
+    let item = menu_item(title, "", sel!(showNotImplemented:), nil);
+    let _: () = msg_send![item, setEnabled: NO];
+    item
+}
+
+unsafe fn separator_item() -> id {
+    msg_send![class!(NSMenuItem), separatorItem]
 }
 
 unsafe fn set_text_view(text_view: id, text: &str, editable: bool) {
@@ -319,6 +561,10 @@ fn app_delegate_class() -> *const Class {
         let mut decl = ClassDecl::new("FastPadAppDelegate", superclass).unwrap();
         decl.add_ivar::<*mut c_void>("state");
         decl.add_method(
+            sel!(newDocument:),
+            new_document as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(openDocument:),
             open_document as extern "C" fn(&Object, Sel, id),
         );
@@ -331,12 +577,24 @@ fn app_delegate_class() -> *const Class {
             page_down_document as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(showNotImplemented:),
+            show_not_implemented as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(applicationShouldTerminateAfterLastWindowClosed:),
             should_terminate_after_last_window_closed as extern "C" fn(&Object, Sel, id) -> BOOL,
         );
         CLASS = decl.register();
     });
     unsafe { CLASS }
+}
+
+extern "C" fn new_document(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.new_document();
+        }
+    }
 }
 
 extern "C" fn open_document(this: &Object, _: Sel, _: id) {
@@ -370,6 +628,14 @@ extern "C" fn page_down_document(this: &Object, _: Sel, _: id) {
     unsafe {
         if let Some(state) = state_from_delegate(this) {
             state.page_down();
+        }
+    }
+}
+
+extern "C" fn show_not_implemented(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.show_not_implemented();
         }
     }
 }

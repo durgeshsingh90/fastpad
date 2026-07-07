@@ -72,7 +72,7 @@ Source: `fastpad_ai_native_complete_srs.json`
 
 | Module | Status | Current coverage |
 |---|---:|---|
-| MOD-001 Application Shell | Partial | Launch, native window/menu, Open, Save, Page Down. Missing multi-window, Finder Open With handling, safe mode, session restore, unsaved-change shutdown prompts. |
+| MOD-001 Application Shell | Partial | Launch, native window, Notepad++-style native menu skeleton, New, Open, Save, Page Down. Missing multi-window, Finder Open With handling, safe mode, session restore, unsaved-change shutdown prompts, and implementations for many visible disabled menu commands. |
 | MOD-002 Document Manager | Partial | Single active document manager, dirty state, open/save path metadata. Missing tabs, close lifecycle, reload/external modification prompts, full metadata lifecycle. |
 | MOD-003 File Engine | Partial | File handles, metadata, sample encoding/line ending/binary detection, mmap, chunk reads, atomic writes. Missing file watch integration, backups, conversion APIs. |
 | MOD-004 Text Buffer | Partial | Rope edit buffer exists and is unit-tested. Missing broader editor-buffer API surface and integrations. |
@@ -88,7 +88,7 @@ Source: `fastpad_ai_native_complete_srs.json`
 | MOD-014 Code Folding Engine | Not implemented | No folding. |
 | MOD-015 Large File Engine | Partial | Large-file primitives exist. Missing chunk cache policy, background indexing, proven multi-GB benchmarks, rich UI. |
 | MOD-016 Workspace Engine | Not implemented | No folder tree or project search. |
-| MOD-017 Command System | Partial | Basic command registry and mode gating. Missing palette, full shortcut routing, complete menu command map. |
+| MOD-017 Command System | Partial | Basic command registry, mode gating, and native menu routing for implemented commands. Missing palette, full shortcut routing, and complete executable command map. |
 | MOD-018 Settings Engine | Partial | In-code `AppSettings` defaults only. No persisted user/project/language settings. |
 | MOD-019 Theme Engine | Not implemented | Relies on native controls only; no editor/theme engine. |
 | MOD-020 Plugin Host | Not implemented | No plugin runtime. |
