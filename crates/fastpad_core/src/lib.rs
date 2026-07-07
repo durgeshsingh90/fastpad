@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_LARGE_FILE_BYTES: u64 = 250 * 1024 * 1024;
 pub const DEFAULT_VERY_LARGE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -17,6 +18,8 @@ pub const DEFAULT_ANALYSIS_THRESHOLD_BYTES: u64 = DEFAULT_HUGE_FILE_BYTES;
 pub const DEFAULT_HUGE_EDIT_WARNING_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_MAX_EDIT_LOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_HUGE_LINE_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_TAB_HIBERNATION_AFTER_SECS: u64 = 15 * 60;
+pub const DEFAULT_SESSION_RESTORE_NEIGHBOR_TABS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorMode {
@@ -48,6 +51,8 @@ pub struct AppSettings {
     pub huge_line_bytes: usize,
     pub initial_viewport_lines: usize,
     pub initial_viewport_bytes: usize,
+    pub tab_hibernation_after_secs: u64,
+    pub session_restore_neighbor_tabs: usize,
 }
 
 impl Default for AppSettings {
@@ -62,6 +67,8 @@ impl Default for AppSettings {
             huge_line_bytes: DEFAULT_HUGE_LINE_BYTES,
             initial_viewport_lines: 120,
             initial_viewport_bytes: 512 * 1024,
+            tab_hibernation_after_secs: DEFAULT_TAB_HIBERNATION_AFTER_SECS,
+            session_restore_neighbor_tabs: DEFAULT_SESSION_RESTORE_NEIGHBOR_TABS,
         }
     }
 }
@@ -108,6 +115,105 @@ impl SystemMemoryStatus {
             total_bytes: None,
             pressure: MemoryPressure::Normal,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenDocumentPolicy {
+    pub hard_tab_limit: Option<usize>,
+    pub hard_document_limit: Option<usize>,
+    pub tab_hibernation_after_secs: u64,
+    pub session_restore_neighbor_tabs: usize,
+    pub lazy_session_restore: bool,
+}
+
+impl OpenDocumentPolicy {
+    pub fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            hard_tab_limit: None,
+            hard_document_limit: None,
+            tab_hibernation_after_secs: settings.tab_hibernation_after_secs,
+            session_restore_neighbor_tabs: settings.session_restore_neighbor_tabs,
+            lazy_session_restore: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentResourceState {
+    pub hibernated: bool,
+    pub chunk_cache_resident: bool,
+    pub line_cache_resident: bool,
+    pub glyph_cache_resident: bool,
+    pub syntax_cache_resident: bool,
+    pub search_tasks_suspended: bool,
+    pub background_indexing_suspended: bool,
+    pub last_active_unix_secs: u64,
+}
+
+impl DocumentResourceState {
+    pub fn active(now_secs: u64) -> Self {
+        Self {
+            hibernated: false,
+            chunk_cache_resident: false,
+            line_cache_resident: false,
+            glyph_cache_resident: false,
+            syntax_cache_resident: false,
+            search_tasks_suspended: false,
+            background_indexing_suspended: false,
+            last_active_unix_secs: now_secs,
+        }
+    }
+
+    fn mark_active(&mut self, now_secs: u64) {
+        self.hibernated = false;
+        self.search_tasks_suspended = false;
+        self.background_indexing_suspended = false;
+        self.last_active_unix_secs = now_secs;
+    }
+
+    fn note_viewport_rendered(&mut self, mode: EditorMode) {
+        self.line_cache_resident = true;
+        self.glyph_cache_resident = true;
+        if mode == EditorMode::ViewAnalysis {
+            self.chunk_cache_resident = true;
+        }
+    }
+
+    fn evict_caches(&mut self) {
+        self.chunk_cache_resident = false;
+        self.line_cache_resident = false;
+        self.glyph_cache_resident = false;
+        self.syntax_cache_resident = false;
+        self.search_tasks_suspended = true;
+        self.background_indexing_suspended = true;
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheEvictionSummary {
+    pub documents_checked: usize,
+    pub documents_hibernated: usize,
+    pub viewport_caches_evicted: usize,
+    pub chunk_caches_evicted: usize,
+    pub line_caches_evicted: usize,
+    pub glyph_caches_evicted: usize,
+    pub syntax_caches_evicted: usize,
+    pub search_tasks_suspended: usize,
+    pub indexing_tasks_suspended: usize,
+}
+
+impl CacheEvictionSummary {
+    fn merge(&mut self, other: Self) {
+        self.documents_checked += other.documents_checked;
+        self.documents_hibernated += other.documents_hibernated;
+        self.viewport_caches_evicted += other.viewport_caches_evicted;
+        self.chunk_caches_evicted += other.chunk_caches_evicted;
+        self.line_caches_evicted += other.line_caches_evicted;
+        self.glyph_caches_evicted += other.glyph_caches_evicted;
+        self.syntax_caches_evicted += other.syntax_caches_evicted;
+        self.search_tasks_suspended += other.search_tasks_suspended;
+        self.indexing_tasks_suspended += other.indexing_tasks_suspended;
     }
 }
 
@@ -432,6 +538,7 @@ pub struct Document {
     internal_engine: InternalEngineProfile,
     mode_reason: String,
     user_notice: Option<String>,
+    resource_state: DocumentResourceState,
     backing: DocumentBacking,
 }
 
@@ -444,6 +551,7 @@ impl Document {
             internal_engine: InternalEngineProfile::NormalEdit,
             mode_reason: "new document".into(),
             user_notice: None,
+            resource_state: DocumentResourceState::active(current_unix_secs()),
             backing: DocumentBacking::Edit {
                 buffer: EditBuffer::new(),
                 path: None,
@@ -475,6 +583,7 @@ impl Document {
                 internal_engine: decision.internal_engine,
                 mode_reason: decision.reason,
                 user_notice: decision.user_notice,
+                resource_state: DocumentResourceState::active(current_unix_secs()),
                 backing: DocumentBacking::View {
                     file,
                     viewport: ViewportEngine::default(),
@@ -496,6 +605,7 @@ impl Document {
                     internal_engine: decision.internal_engine,
                     mode_reason: decision.reason,
                     user_notice: decision.user_notice,
+                    resource_state: DocumentResourceState::active(current_unix_secs()),
                     backing: DocumentBacking::Edit {
                         buffer: EditBuffer::from_text(&text),
                         path: Some(file.path().to_path_buf()),
@@ -530,6 +640,73 @@ impl Document {
         self.user_notice.as_deref()
     }
 
+    pub fn resource_state(&self) -> DocumentResourceState {
+        self.resource_state
+    }
+
+    pub fn mark_active(&mut self, now_secs: u64) {
+        self.resource_state.mark_active(now_secs);
+    }
+
+    pub fn release_inactive_caches(&mut self) -> CacheEvictionSummary {
+        let previous = self.resource_state;
+        let mut summary = CacheEvictionSummary {
+            documents_checked: 1,
+            ..Default::default()
+        };
+
+        if previous.chunk_cache_resident {
+            summary.chunk_caches_evicted = 1;
+        }
+        if previous.line_cache_resident {
+            summary.line_caches_evicted = 1;
+        }
+        if previous.glyph_cache_resident {
+            summary.glyph_caches_evicted = 1;
+        }
+        if previous.syntax_cache_resident {
+            summary.syntax_caches_evicted = 1;
+        }
+        if !previous.search_tasks_suspended {
+            summary.search_tasks_suspended = 1;
+        }
+        if !previous.background_indexing_suspended {
+            summary.indexing_tasks_suspended = 1;
+        }
+
+        if let DocumentBacking::View { viewport, .. } = &mut self.backing {
+            if previous.chunk_cache_resident || previous.line_cache_resident {
+                *viewport = ViewportEngine::default();
+                summary.viewport_caches_evicted = 1;
+            }
+        }
+
+        self.resource_state.evict_caches();
+        summary
+    }
+
+    pub fn hibernate_if_inactive(
+        &mut self,
+        now_secs: u64,
+        inactive_after_secs: u64,
+    ) -> CacheEvictionSummary {
+        if now_secs.saturating_sub(self.resource_state.last_active_unix_secs) < inactive_after_secs
+        {
+            return CacheEvictionSummary {
+                documents_checked: 1,
+                ..Default::default()
+            };
+        }
+
+        let was_hibernated = self.resource_state.hibernated;
+        let mut summary = self.release_inactive_caches();
+        self.resource_state.hibernated = true;
+        if !was_hibernated {
+            summary.documents_hibernated = 1;
+        }
+        summary
+    }
+
     pub fn path(&self) -> Option<&Path> {
         match &self.backing {
             DocumentBacking::View { file, .. } => Some(file.path()),
@@ -560,7 +737,7 @@ impl Document {
     }
 
     pub fn viewport(&mut self, request: ViewportRequest) -> Result<Viewport> {
-        match &mut self.backing {
+        let viewport = match &mut self.backing {
             DocumentBacking::View { file, viewport } => viewport.render(file, request),
             DocumentBacking::Edit { buffer, .. } => {
                 let text = buffer.text();
@@ -584,7 +761,11 @@ impl Document {
                     lines,
                 })
             }
+        };
+        if viewport.is_ok() {
+            self.resource_state.note_viewport_rendered(self.mode);
         }
+        viewport
     }
 
     pub fn edit_buffer_mut(&mut self) -> Result<&mut EditBuffer> {
@@ -881,6 +1062,10 @@ impl DocumentManager {
         &self.settings
     }
 
+    pub fn open_document_policy(&self) -> OpenDocumentPolicy {
+        OpenDocumentPolicy::from_settings(&self.settings)
+    }
+
     pub fn open(&mut self, path: impl AsRef<Path>, intent: OpenIntent) -> Result<DocumentId> {
         let tab_id = self.open_tab(path, intent)?;
         Ok(self
@@ -984,6 +1169,12 @@ impl DocumentManager {
         self.active_tab().map(|tab| tab.view.clone())
     }
 
+    pub fn document_resource_state(&self, id: DocumentId) -> Option<DocumentResourceState> {
+        self.documents
+            .get(&id)
+            .map(|document| document.read().resource_state())
+    }
+
     pub fn update_active_view_state(
         &mut self,
         update: impl FnOnce(&mut DocumentViewState),
@@ -999,9 +1190,9 @@ impl DocumentManager {
     }
 
     pub fn set_active_tab(&mut self, tab_id: TabId) -> bool {
-        if !self.tabs.contains_key(&tab_id) {
+        let Some(document_id) = self.tabs.get(&tab_id).map(|tab| tab.document_id) else {
             return false;
-        }
+        };
         let Some(window) = self.windows.get_mut(&self.active_window) else {
             return false;
         };
@@ -1009,6 +1200,7 @@ impl DocumentManager {
             return false;
         }
         window.active_tab = Some(tab_id);
+        self.mark_document_active(document_id, current_unix_secs());
         true
     }
 
@@ -1043,6 +1235,46 @@ impl DocumentManager {
         self.documents
             .values()
             .any(|document| document.read().is_dirty())
+    }
+
+    pub fn maintain_resource_policy(&mut self) -> CacheEvictionSummary {
+        self.maintain_resource_policy_with_system(
+            SystemMemoryStatus::current(),
+            current_unix_secs(),
+        )
+    }
+
+    pub fn maintain_resource_policy_with_system(
+        &mut self,
+        system: SystemMemoryStatus,
+        now_secs: u64,
+    ) -> CacheEvictionSummary {
+        let mut summary = self.apply_memory_pressure_policy_at(system, now_secs);
+        summary.merge(self.hibernate_inactive_tabs(now_secs));
+        summary
+    }
+
+    pub fn apply_memory_pressure_policy(
+        &mut self,
+        system: SystemMemoryStatus,
+    ) -> CacheEvictionSummary {
+        self.apply_memory_pressure_policy_at(system, current_unix_secs())
+    }
+
+    pub fn apply_memory_pressure_policy_at(
+        &mut self,
+        system: SystemMemoryStatus,
+        now_secs: u64,
+    ) -> CacheEvictionSummary {
+        match system.pressure {
+            MemoryPressure::Unknown | MemoryPressure::Normal => CacheEvictionSummary::default(),
+            MemoryPressure::Elevated => self.release_inactive_document_caches(),
+            MemoryPressure::Critical => self.hibernate_inactive_documents(now_secs, 0),
+        }
+    }
+
+    pub fn hibernate_inactive_tabs(&mut self, now_secs: u64) -> CacheEvictionSummary {
+        self.hibernate_inactive_documents(now_secs, self.settings.tab_hibernation_after_secs)
     }
 
     fn document_id_for_path(&mut self, path: &Path, intent: OpenIntent) -> Result<DocumentId> {
@@ -1083,6 +1315,7 @@ impl DocumentManager {
             .expect("active window exists");
         window.tabs.push(tab_id);
         window.active_tab = Some(tab_id);
+        self.mark_document_active(document_id, current_unix_secs());
         tab_id
     }
 
@@ -1109,22 +1342,71 @@ impl DocumentManager {
     }
 
     fn activate_relative_tab(&mut self, delta: isize) -> bool {
-        let Some(window) = self.windows.get_mut(&self.active_window) else {
-            return false;
+        let next_tab = {
+            let Some(window) = self.windows.get_mut(&self.active_window) else {
+                return false;
+            };
+            if window.tabs.is_empty() {
+                return false;
+            }
+            let current = window.active_tab.unwrap_or(window.tabs[0]);
+            let current_idx = window
+                .tabs
+                .iter()
+                .position(|tab_id| *tab_id == current)
+                .unwrap_or(0);
+            let len = window.tabs.len() as isize;
+            let next_idx = (current_idx as isize + delta).rem_euclid(len) as usize;
+            let next_tab = window.tabs[next_idx];
+            window.active_tab = Some(next_tab);
+            next_tab
         };
-        if window.tabs.is_empty() {
-            return false;
-        }
-        let current = window.active_tab.unwrap_or(window.tabs[0]);
-        let current_idx = window
-            .tabs
-            .iter()
-            .position(|tab_id| *tab_id == current)
-            .unwrap_or(0);
-        let len = window.tabs.len() as isize;
-        let next_idx = (current_idx as isize + delta).rem_euclid(len) as usize;
-        window.active_tab = Some(window.tabs[next_idx]);
+        self.mark_document_active_for_tab(next_tab);
         true
+    }
+
+    fn release_inactive_document_caches(&mut self) -> CacheEvictionSummary {
+        let active_document_id = self.active_document_id();
+        let mut summary = CacheEvictionSummary::default();
+        for (document_id, document) in &self.documents {
+            if Some(*document_id) == active_document_id {
+                continue;
+            }
+            summary.merge(document.write().release_inactive_caches());
+        }
+        summary
+    }
+
+    fn hibernate_inactive_documents(
+        &mut self,
+        now_secs: u64,
+        inactive_after_secs: u64,
+    ) -> CacheEvictionSummary {
+        let active_document_id = self.active_document_id();
+        let mut summary = CacheEvictionSummary::default();
+        for (document_id, document) in &self.documents {
+            if Some(*document_id) == active_document_id {
+                continue;
+            }
+            summary.merge(
+                document
+                    .write()
+                    .hibernate_if_inactive(now_secs, inactive_after_secs),
+            );
+        }
+        summary
+    }
+
+    fn mark_document_active_for_tab(&mut self, tab_id: TabId) {
+        if let Some(document_id) = self.tabs.get(&tab_id).map(|tab| tab.document_id) {
+            self.mark_document_active(document_id, current_unix_secs());
+        }
+    }
+
+    fn mark_document_active(&mut self, document_id: DocumentId, now_secs: u64) {
+        if let Some(document) = self.documents.get(&document_id) {
+            document.write().mark_active(now_secs);
+        }
     }
 
     fn tab_summary(&self, tab_id: TabId) -> Option<TabSummary> {
@@ -1170,6 +1452,13 @@ impl DocumentManager {
 
 fn normalized_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1426,6 +1715,131 @@ mod tests {
         assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.document_count(), 1);
         assert_eq!(manager.active_tab_id(), Some(first_tab));
+    }
+
+    #[test]
+    fn open_document_policy_has_no_fixed_tab_or_document_limit() {
+        let manager = DocumentManager::new(AppSettings::default());
+        let policy = manager.open_document_policy();
+
+        assert_eq!(policy.hard_tab_limit, None);
+        assert_eq!(policy.hard_document_limit, None);
+        assert!(policy.lazy_session_restore);
+        assert_eq!(
+            policy.tab_hibernation_after_secs,
+            DEFAULT_TAB_HIBERNATION_AFTER_SECS
+        );
+    }
+
+    #[test]
+    fn memory_pressure_hibernates_inactive_document_without_closing_it() {
+        let mut first = tempfile::NamedTempFile::new().unwrap();
+        let mut second = tempfile::NamedTempFile::new().unwrap();
+        writeln!(first, "first").unwrap();
+        writeln!(second, "second").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+        let intent = OpenIntent {
+            force_analysis: true,
+            force_edit: false,
+        };
+
+        let first_doc = manager.open(first.path(), intent).unwrap();
+        let first_handle = manager.get(first_doc).unwrap();
+        first_handle
+            .write()
+            .viewport(ViewportRequest {
+                anchor: ViewAnchor::Start,
+                max_lines: 10,
+                max_bytes: 1024,
+            })
+            .unwrap();
+
+        let second_doc = manager.open(second.path(), intent).unwrap();
+        assert_eq!(manager.active_document_id(), Some(second_doc));
+        assert!(
+            manager
+                .document_resource_state(first_doc)
+                .unwrap()
+                .line_cache_resident
+        );
+
+        let summary = manager.apply_memory_pressure_policy_at(
+            SystemMemoryStatus {
+                available_bytes: Some(32 * 1024 * 1024),
+                total_bytes: Some(8 * 1024 * 1024 * 1024),
+                pressure: MemoryPressure::Critical,
+            },
+            10_000,
+        );
+
+        assert_eq!(manager.document_count(), 2);
+        assert_eq!(manager.tab_count(), 2);
+        assert_eq!(summary.documents_hibernated, 1);
+        assert_eq!(summary.viewport_caches_evicted, 1);
+        let inactive = manager.document_resource_state(first_doc).unwrap();
+        assert!(inactive.hibernated);
+        assert!(!inactive.chunk_cache_resident);
+        assert!(!inactive.line_cache_resident);
+        assert!(inactive.search_tasks_suspended);
+        assert!(inactive.background_indexing_suspended);
+        assert!(
+            !manager
+                .document_resource_state(second_doc)
+                .unwrap()
+                .hibernated
+        );
+    }
+
+    #[test]
+    fn activating_hibernated_tab_wakes_document_and_preserves_view_state() {
+        let mut first = tempfile::NamedTempFile::new().unwrap();
+        let mut second = tempfile::NamedTempFile::new().unwrap();
+        writeln!(first, "first").unwrap();
+        writeln!(second, "second").unwrap();
+        let mut manager = DocumentManager::new(AppSettings {
+            tab_hibernation_after_secs: 1,
+            ..Default::default()
+        });
+        let intent = OpenIntent {
+            force_analysis: true,
+            force_edit: false,
+        };
+
+        let first_tab = manager.open_tab(first.path(), intent).unwrap();
+        let first_doc = manager.active_document_id().unwrap();
+        manager.update_active_view_state(|view| {
+            view.anchor = ViewAnchor::Byte(fastpad_file::ByteOffset(42));
+            view.bookmarks.push(fastpad_file::ByteOffset(7));
+        });
+        let _second_tab = manager.open_tab(second.path(), intent).unwrap();
+
+        let first_last_active = manager
+            .document_resource_state(first_doc)
+            .unwrap()
+            .last_active_unix_secs;
+        let summary = manager.hibernate_inactive_tabs(first_last_active + 2);
+
+        assert_eq!(summary.documents_hibernated, 1);
+        assert!(
+            manager
+                .document_resource_state(first_doc)
+                .unwrap()
+                .hibernated
+        );
+
+        assert!(manager.set_active_tab(first_tab));
+
+        let resource_state = manager.document_resource_state(first_doc).unwrap();
+        assert!(!resource_state.hibernated);
+        assert!(!resource_state.search_tasks_suspended);
+        assert_eq!(
+            manager.active_view_state().unwrap().anchor,
+            ViewAnchor::Byte(fastpad_file::ByteOffset(42))
+        );
+        assert_eq!(
+            manager.active_view_state().unwrap().bookmarks,
+            vec![fastpad_file::ByteOffset(7)]
+        );
     }
 
     #[test]

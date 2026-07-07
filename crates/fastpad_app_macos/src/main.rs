@@ -456,6 +456,8 @@ impl AppState {
                 Err(error) => self.show_error(&format!("Open task failed: {error}")),
             }
         }
+
+        let _ = self.manager.maintain_resource_policy();
     }
 
     unsafe fn save_copy_as(&mut self) -> bool {
