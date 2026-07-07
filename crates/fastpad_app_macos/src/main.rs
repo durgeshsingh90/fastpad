@@ -6,7 +6,7 @@ use cocoa::appkit::{
     NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
+use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRange, NSRect, NSSize, NSString};
 use fastpad_core::{AppSettings, DocumentManager, EditorMode, OpenIntent, TabSummary};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
 use libc::c_char;
@@ -28,6 +28,13 @@ const NS_TERMINATE_NOW: i64 = 1;
 const NS_VIEW_WIDTH_SIZABLE: u64 = 2;
 const NS_VIEW_HEIGHT_SIZABLE: u64 = 16;
 const NS_VIEW_MIN_Y_MARGIN: u64 = 8;
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    static NSFontAttributeName: id;
+    static NSForegroundColorAttributeName: id;
+    static NSBackgroundColorAttributeName: id;
+}
 
 struct AppState {
     manager: DocumentManager,
@@ -130,9 +137,10 @@ impl AppState {
         }
 
         self.present_text(text, mode == EditorMode::Edit);
-        set_window_title(self.window, &format!("{title} - FastPad"));
+        let tabs = self.manager.tab_summaries();
+        set_window_title(self.window, &window_title(&title, &tabs));
         set_status(self.status_field, &status);
-        self.refresh_tab_bar();
+        self.set_tab_bar_from_summaries(&tabs);
     }
 
     unsafe fn page_down(&mut self) {
@@ -309,7 +317,11 @@ impl AppState {
     }
 
     unsafe fn refresh_tab_bar(&self) {
-        set_tab_bar(self.tab_bar, &tab_bar_text(&self.manager.tab_summaries()));
+        self.set_tab_bar_from_summaries(&self.manager.tab_summaries());
+    }
+
+    unsafe fn set_tab_bar_from_summaries(&self, tabs: &[TabSummary]) {
+        set_tab_bar(self.tab_bar, tabs);
     }
 
     unsafe fn save_copy_as(&mut self) -> bool {
@@ -419,7 +431,7 @@ fn main() {
                 status_field,
                 "No document open - View/Analysis Mode opens huge files read-only",
             );
-            set_tab_bar(tab_bar, "No tabs");
+            set_tab_bar(tab_bar, &[]);
         } else {
             (*state).open_paths(paths);
         }
@@ -872,8 +884,59 @@ unsafe fn set_text_view(text_view: id, text: &str, editable: bool) {
     let _: () = msg_send![text_view, setEditable: if editable { YES } else { NO }];
 }
 
-unsafe fn set_tab_bar(tab_bar: id, text: &str) {
-    let _: () = msg_send![tab_bar, setStringValue: ns_string(text)];
+unsafe fn set_tab_bar(tab_bar: id, tabs: &[TabSummary]) {
+    let render = tab_bar_render(tabs);
+    let attributed: id = msg_send![class!(NSMutableAttributedString), alloc];
+    let attributed: id = msg_send![attributed, initWithString: ns_string(&render.text)];
+
+    let full_range = NSRange::new(0, render.utf16_len() as _);
+    let normal_font: id = msg_send![class!(NSFont), systemFontOfSize: 12.0f64];
+    let text_color: id = msg_send![class!(NSColor), labelColor];
+    let _: () = msg_send![
+        attributed,
+        addAttribute: NSFontAttributeName
+        value: normal_font
+        range: full_range
+    ];
+    let _: () = msg_send![
+        attributed,
+        addAttribute: NSForegroundColorAttributeName
+        value: text_color
+        range: full_range
+    ];
+
+    if let Some((location, length)) = render.active_range_utf16 {
+        let active_range = NSRange::new(location as _, length as _);
+        let active_font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 12.0f64];
+        let active_text: id = msg_send![class!(NSColor), whiteColor];
+        let active_background: id = msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: 0.10f64
+            green: 0.36f64
+            blue: 0.82f64
+            alpha: 1.0f64
+        ];
+        let _: () = msg_send![
+            attributed,
+            addAttribute: NSFontAttributeName
+            value: active_font
+            range: active_range
+        ];
+        let _: () = msg_send![
+            attributed,
+            addAttribute: NSForegroundColorAttributeName
+            value: active_text
+            range: active_range
+        ];
+        let _: () = msg_send![
+            attributed,
+            addAttribute: NSBackgroundColorAttributeName
+            value: active_background
+            range: active_range
+        ];
+    }
+
+    let _: () = msg_send![tab_bar, setAttributedStringValue: attributed];
 }
 
 unsafe fn set_status(status_field: id, text: &str) {
@@ -939,14 +1002,50 @@ unsafe fn nsstring_to_string(value: id) -> String {
     }
 }
 
-fn tab_bar_text(tabs: &[TabSummary]) -> String {
-    if tabs.is_empty() {
-        return "No tabs".to_string();
-    }
-    tabs.iter().map(tab_label).collect::<Vec<_>>().join("  |  ")
+#[derive(Debug, PartialEq, Eq)]
+struct TabBarRender {
+    text: String,
+    active_range_utf16: Option<(usize, usize)>,
 }
 
-fn tab_label(tab: &TabSummary) -> String {
+impl TabBarRender {
+    fn utf16_len(&self) -> usize {
+        self.text.encode_utf16().count()
+    }
+}
+
+fn tab_bar_render(tabs: &[TabSummary]) -> TabBarRender {
+    if tabs.is_empty() {
+        return TabBarRender {
+            text: "No tabs".to_string(),
+            active_range_utf16: None,
+        };
+    }
+
+    let mut text = String::new();
+    let mut active_range_utf16 = None;
+
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            text.push_str("  |  ");
+        }
+
+        let label = tab_label(index + 1, tab);
+        let start = text.encode_utf16().count();
+        text.push_str(&label);
+
+        if tab.active {
+            active_range_utf16 = Some((start, label.encode_utf16().count()));
+        }
+    }
+
+    TabBarRender {
+        text,
+        active_range_utf16,
+    }
+}
+
+fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
     let icon = if tab.pinned { "📌" } else { "📄" };
     let mut flags = String::new();
     if tab.view_analysis {
@@ -961,12 +1060,19 @@ fn tab_label(tab: &TabSummary) -> String {
     if tab.external_modified {
         flags.push_str(" !");
     }
-    let label = format!("{icon} {}{flags}", tab.title);
     if tab.active {
-        format!("[{label}]")
+        format!("▶ {tab_number}. {icon} {}{flags}", tab.title)
     } else {
-        label
+        format!("{tab_number}. {icon} {}{flags}", tab.title)
     }
+}
+
+fn window_title(title: &str, tabs: &[TabSummary]) -> String {
+    let count = tabs.len();
+    let Some(active_index) = tabs.iter().position(|tab| tab.active).map(|index| index + 1) else {
+        return format!("{title} - FastPad");
+    };
+    format!("{active_index}/{count} {title} - FastPad")
 }
 
 fn app_delegate_class() -> *const Class {
@@ -1161,4 +1267,60 @@ extern "C" fn application_open_files(this: &Object, _: Sel, app: id, files: id) 
 unsafe fn state_from_delegate<'a>(delegate: &Object) -> Option<&'a mut AppState> {
     let state: *mut c_void = *delegate.get_ivar("state");
     (state as *mut AppState).as_mut()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastpad_core::{DocumentId, TabId, ViewId};
+
+    fn summary(tab_number: u64, title: &str, active: bool) -> TabSummary {
+        TabSummary {
+            id: TabId(tab_number),
+            view_id: ViewId(tab_number),
+            document_id: DocumentId(tab_number),
+            title: title.to_string(),
+            dirty: false,
+            read_only: false,
+            view_analysis: false,
+            external_modified: false,
+            pinned: false,
+            preview: false,
+            active,
+        }
+    }
+
+    #[test]
+    fn tab_bar_numbers_tabs_and_marks_active_front_tab() {
+        let tabs = vec![
+            summary(1, "first.txt", false),
+            summary(2, "second.txt", true),
+            summary(3, "third.txt", false),
+        ];
+
+        let render = tab_bar_render(&tabs);
+        let active_label = "▶ 2. 📄 second.txt";
+        let active_start = render.text.find(active_label).unwrap();
+
+        assert!(render.text.contains("1. 📄 first.txt"));
+        assert!(render.text.contains(active_label));
+        assert!(render.text.contains("3. 📄 third.txt"));
+        assert_eq!(
+            render.active_range_utf16,
+            Some((
+                render.text[..active_start].encode_utf16().count(),
+                active_label.encode_utf16().count()
+            ))
+        );
+    }
+
+    #[test]
+    fn window_title_includes_active_tab_position() {
+        let tabs = vec![
+            summary(1, "first.txt", false),
+            summary(2, "second.txt", true),
+        ];
+
+        assert_eq!(window_title("second.txt", &tabs), "2/2 second.txt - FastPad");
+    }
 }
