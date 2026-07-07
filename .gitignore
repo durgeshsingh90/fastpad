@@ -5,3 +5,4 @@
 *.swo
 .DS_Store
 FastPad.app/
+crates/fastpad_app_macos/Assets/AppIcon.iconset/
