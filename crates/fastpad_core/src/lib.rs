@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use fastpad_edit::EditBuffer;
-use fastpad_file::{atomic_write, FileHandle, FileMetadata, FileOpenOptions};
+use fastpad_file::{atomic_write, FileHandle, FileKind, FileMetadata, FileOpenOptions};
 use fastpad_search::{SearchEngine, SearchQuery, SearchSummary};
 use fastpad_tasks::CancellationToken;
 use fastpad_viewport::{ViewAnchor, Viewport, ViewportEngine, ViewportRequest};
@@ -10,9 +10,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const DEFAULT_ANALYSIS_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_LARGE_FILE_BYTES: u64 = 250 * 1024 * 1024;
+pub const DEFAULT_VERY_LARGE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const DEFAULT_HUGE_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_ANALYSIS_THRESHOLD_BYTES: u64 = DEFAULT_HUGE_FILE_BYTES;
 pub const DEFAULT_HUGE_EDIT_WARNING_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_MAX_EDIT_LOAD_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_HUGE_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorMode {
@@ -36,8 +40,12 @@ impl EditorMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub analysis_threshold_bytes: u64,
+    pub large_file_bytes: u64,
+    pub very_large_file_bytes: u64,
+    pub huge_file_bytes: u64,
     pub huge_edit_warning_bytes: u64,
     pub max_edit_load_bytes: u64,
+    pub huge_line_bytes: usize,
     pub initial_viewport_lines: usize,
     pub initial_viewport_bytes: usize,
 }
@@ -46,8 +54,12 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             analysis_threshold_bytes: DEFAULT_ANALYSIS_THRESHOLD_BYTES,
+            large_file_bytes: DEFAULT_LARGE_FILE_BYTES,
+            very_large_file_bytes: DEFAULT_VERY_LARGE_FILE_BYTES,
+            huge_file_bytes: DEFAULT_HUGE_FILE_BYTES,
             huge_edit_warning_bytes: DEFAULT_HUGE_EDIT_WARNING_BYTES,
             max_edit_load_bytes: DEFAULT_MAX_EDIT_LOAD_BYTES,
+            huge_line_bytes: DEFAULT_HUGE_LINE_BYTES,
             initial_viewport_lines: 120,
             initial_viewport_bytes: 512 * 1024,
         }
@@ -60,10 +72,141 @@ pub struct OpenIntent {
     pub force_edit: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InternalEngineProfile {
+    NormalEdit,
+    LargeOptimizedEdit,
+    StreamingEdit,
+    HugeFileAnalysis,
+    StructuredDataAnalysis,
+    BinaryInspection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryPressure {
+    Unknown,
+    Normal,
+    Elevated,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemMemoryStatus {
+    pub available_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub pressure: MemoryPressure,
+}
+
+impl SystemMemoryStatus {
+    pub fn current() -> Self {
+        current_system_memory_status()
+    }
+
+    pub fn unconstrained_for_tests() -> Self {
+        Self {
+            available_bytes: None,
+            total_bytes: None,
+            pressure: MemoryPressure::Normal,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_system_memory_status() -> SystemMemoryStatus {
+    use std::ptr::addr_of;
+
+    unsafe {
+        let mut stats = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed().assume_init();
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        #[allow(deprecated)]
+        let host = libc::mach_host_self();
+        let result = libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            &mut stats as *mut libc::vm_statistics64 as libc::host_info64_t,
+            &mut count,
+        );
+        let total_bytes = system_total_memory_bytes();
+        if result != 0 {
+            return SystemMemoryStatus {
+                available_bytes: None,
+                total_bytes,
+                pressure: MemoryPressure::Unknown,
+            };
+        }
+
+        let page_size = system_page_size().max(1);
+        let free = addr_of!(stats.free_count).read_unaligned() as u64;
+        let inactive = addr_of!(stats.inactive_count).read_unaligned() as u64;
+        let speculative = addr_of!(stats.speculative_count).read_unaligned() as u64;
+        let compressor = addr_of!(stats.compressor_page_count).read_unaligned() as u64;
+        let available_bytes = free
+            .saturating_add(inactive)
+            .saturating_add(speculative)
+            .saturating_mul(page_size);
+        let pressure = match total_bytes {
+            Some(total) if total > 0 => {
+                let available_ratio = available_bytes as f64 / total as f64;
+                let compressed_ratio = compressor.saturating_mul(page_size) as f64 / total as f64;
+                if available_ratio < 0.05 || compressed_ratio > 0.25 {
+                    MemoryPressure::Critical
+                } else if available_ratio < 0.15 || compressed_ratio > 0.15 {
+                    MemoryPressure::Elevated
+                } else {
+                    MemoryPressure::Normal
+                }
+            }
+            _ => MemoryPressure::Unknown,
+        };
+
+        SystemMemoryStatus {
+            available_bytes: Some(available_bytes),
+            total_bytes,
+            pressure,
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_system_memory_status() -> SystemMemoryStatus {
+    SystemMemoryStatus {
+        available_bytes: None,
+        total_bytes: None,
+        pressure: MemoryPressure::Unknown,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_page_size() -> u64 {
+    unsafe {
+        let page_size = libc::sysconf(libc::_SC_PAGE_SIZE);
+        if page_size > 0 {
+            page_size as u64
+        } else {
+            libc::vm_page_size as u64
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_total_memory_bytes() -> Option<u64> {
+    unsafe {
+        let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
+        let page_size = system_page_size();
+        if pages > 0 && page_size > 0 {
+            Some((pages as u64).saturating_mul(page_size))
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModeDecision {
     pub mode: EditorMode,
+    pub internal_engine: InternalEngineProfile,
     pub reason: String,
+    pub user_notice: Option<String>,
     pub requires_huge_edit_warning: bool,
 }
 
@@ -77,38 +220,196 @@ impl ModeManager {
     }
 
     pub fn choose_for_open(&self, metadata: &FileMetadata, intent: OpenIntent) -> ModeDecision {
+        self.choose_for_open_with_system(metadata, intent, SystemMemoryStatus::current())
+    }
+
+    pub fn choose_for_open_with_system(
+        &self,
+        metadata: &FileMetadata,
+        intent: OpenIntent,
+        system: SystemMemoryStatus,
+    ) -> ModeDecision {
         if intent.force_analysis {
             return ModeDecision {
                 mode: EditorMode::ViewAnalysis,
+                internal_engine: self.analysis_profile(metadata),
                 reason: "forced read-only analysis".into(),
+                user_notice: None,
                 requires_huge_edit_warning: false,
             };
         }
 
         if intent.force_edit {
+            let internal_engine = self.edit_profile(metadata);
             return ModeDecision {
                 mode: EditorMode::Edit,
+                internal_engine,
                 reason: "forced edit".into(),
+                user_notice: optimization_notice(internal_engine),
                 requires_huge_edit_warning: metadata.len >= self.settings.huge_edit_warning_bytes,
             };
         }
 
-        if metadata.len >= self.settings.analysis_threshold_bytes
-            || metadata.intelligence.very_long_line_warning
-            || !metadata.intelligence.likely_text
-        {
+        if !metadata.intelligence.likely_text || matches!(metadata.kind, FileKind::Binary) {
             return ModeDecision {
                 mode: EditorMode::ViewAnalysis,
-                reason: "large or risky file opened using bounded read-only path".into(),
+                internal_engine: InternalEngineProfile::BinaryInspection,
+                reason: "binary-like content opened using bounded inspection path".into(),
+                user_notice: None,
                 requires_huge_edit_warning: false,
             };
         }
 
+        if metadata.intelligence.longest_line_bytes >= self.settings.huge_line_bytes {
+            return ModeDecision {
+                mode: EditorMode::ViewAnalysis,
+                internal_engine: InternalEngineProfile::HugeFileAnalysis,
+                reason: "extremely long line requires viewport-driven analysis".into(),
+                user_notice: Some("Large File Optimizations Enabled".into()),
+                requires_huge_edit_warning: false,
+            };
+        }
+
+        if self.is_structured_analysis_candidate(metadata) {
+            return ModeDecision {
+                mode: EditorMode::ViewAnalysis,
+                internal_engine: InternalEngineProfile::StructuredDataAnalysis,
+                reason: "large structured data file opened with streaming analysis".into(),
+                user_notice: None,
+                requires_huge_edit_warning: false,
+            };
+        }
+
+        if self.exceeds_huge_threshold(metadata) {
+            return ModeDecision {
+                mode: EditorMode::ViewAnalysis,
+                internal_engine: InternalEngineProfile::HugeFileAnalysis,
+                reason: "huge file opened using bounded read-only analysis".into(),
+                user_notice: None,
+                requires_huge_edit_warning: false,
+            };
+        }
+
+        if self.memory_pressure_requires_analysis(metadata, system) {
+            return ModeDecision {
+                mode: EditorMode::ViewAnalysis,
+                internal_engine: self.analysis_profile(metadata),
+                reason: "current memory constraints require bounded analysis".into(),
+                user_notice: Some("Large File Optimizations Enabled".into()),
+                requires_huge_edit_warning: false,
+            };
+        }
+
+        if metadata.len > self.settings.max_edit_load_bytes {
+            return ModeDecision {
+                mode: EditorMode::ViewAnalysis,
+                internal_engine: InternalEngineProfile::HugeFileAnalysis,
+                reason: "file exceeds currently bounded edit-engine load".into(),
+                user_notice: Some("Large File Optimizations Enabled".into()),
+                requires_huge_edit_warning: false,
+            };
+        }
+
+        let internal_engine = self.edit_profile(metadata);
         ModeDecision {
             mode: EditorMode::Edit,
-            reason: "file is within edit threshold".into(),
+            internal_engine,
+            reason: self.edit_reason(metadata, internal_engine),
+            user_notice: optimization_notice(internal_engine),
             requires_huge_edit_warning: false,
         }
+    }
+
+    fn exceeds_huge_threshold(&self, metadata: &FileMetadata) -> bool {
+        let huge_threshold = self
+            .settings
+            .analysis_threshold_bytes
+            .min(self.settings.huge_file_bytes);
+        metadata.len >= huge_threshold
+    }
+
+    fn is_structured_analysis_candidate(&self, metadata: &FileMetadata) -> bool {
+        matches!(
+            metadata.kind,
+            FileKind::Csv | FileKind::Tsv | FileKind::SqlDump
+        ) && metadata.len >= self.settings.large_file_bytes
+    }
+
+    fn memory_pressure_requires_analysis(
+        &self,
+        metadata: &FileMetadata,
+        system: SystemMemoryStatus,
+    ) -> bool {
+        if metadata.len < self.settings.large_file_bytes {
+            return false;
+        }
+        if matches!(system.pressure, MemoryPressure::Critical) {
+            return true;
+        }
+        if let Some(available) = system.available_bytes {
+            return metadata.len.saturating_mul(3) > available;
+        }
+        if let Some(total) = system.total_bytes {
+            return metadata.len.saturating_mul(2) > total;
+        }
+        false
+    }
+
+    fn analysis_profile(&self, metadata: &FileMetadata) -> InternalEngineProfile {
+        if matches!(metadata.kind, FileKind::Binary) || !metadata.intelligence.likely_text {
+            InternalEngineProfile::BinaryInspection
+        } else if matches!(
+            metadata.kind,
+            FileKind::Csv | FileKind::Tsv | FileKind::SqlDump
+        ) {
+            InternalEngineProfile::StructuredDataAnalysis
+        } else {
+            InternalEngineProfile::HugeFileAnalysis
+        }
+    }
+
+    fn edit_profile(&self, metadata: &FileMetadata) -> InternalEngineProfile {
+        if metadata.len >= self.settings.very_large_file_bytes {
+            InternalEngineProfile::StreamingEdit
+        } else if metadata.len >= self.settings.large_file_bytes
+            || metadata.intelligence.very_long_line_warning
+            || metadata.intelligence.average_line_bytes >= 8 * 1024
+        {
+            InternalEngineProfile::LargeOptimizedEdit
+        } else {
+            InternalEngineProfile::NormalEdit
+        }
+    }
+
+    fn edit_reason(&self, metadata: &FileMetadata, profile: InternalEngineProfile) -> String {
+        match profile {
+            InternalEngineProfile::NormalEdit => "file fits normal edit path".into(),
+            InternalEngineProfile::LargeOptimizedEdit => {
+                if metadata.intelligence.very_long_line_warning {
+                    "long lines require lazy measurement and virtual rendering".into()
+                } else {
+                    "large file uses edit mode with optimizations".into()
+                }
+            }
+            InternalEngineProfile::StreamingEdit => {
+                "very large file uses streaming edit optimizations".into()
+            }
+            InternalEngineProfile::HugeFileAnalysis
+            | InternalEngineProfile::StructuredDataAnalysis
+            | InternalEngineProfile::BinaryInspection => "analysis profile selected".into(),
+        }
+    }
+}
+
+fn optimization_notice(profile: InternalEngineProfile) -> Option<String> {
+    match profile {
+        InternalEngineProfile::LargeOptimizedEdit | InternalEngineProfile::StreamingEdit => {
+            Some("Large File Optimizations Enabled".into())
+        }
+        InternalEngineProfile::NormalEdit
+        | InternalEngineProfile::HugeFileAnalysis
+        | InternalEngineProfile::StructuredDataAnalysis
+        | InternalEngineProfile::BinaryInspection => None,
     }
 }
 
@@ -128,7 +429,9 @@ pub struct Document {
     id: DocumentId,
     title: String,
     mode: EditorMode,
+    internal_engine: InternalEngineProfile,
     mode_reason: String,
+    user_notice: Option<String>,
     backing: DocumentBacking,
 }
 
@@ -138,7 +441,9 @@ impl Document {
             id,
             title: "Untitled".into(),
             mode: EditorMode::Edit,
+            internal_engine: InternalEngineProfile::NormalEdit,
             mode_reason: "new document".into(),
+            user_notice: None,
             backing: DocumentBacking::Edit {
                 buffer: EditBuffer::new(),
                 path: None,
@@ -167,7 +472,9 @@ impl Document {
                 id,
                 title,
                 mode: EditorMode::ViewAnalysis,
+                internal_engine: decision.internal_engine,
                 mode_reason: decision.reason,
+                user_notice: decision.user_notice,
                 backing: DocumentBacking::View {
                     file,
                     viewport: ViewportEngine::default(),
@@ -186,7 +493,9 @@ impl Document {
                     id,
                     title,
                     mode: EditorMode::Edit,
+                    internal_engine: decision.internal_engine,
                     mode_reason: decision.reason,
+                    user_notice: decision.user_notice,
                     backing: DocumentBacking::Edit {
                         buffer: EditBuffer::from_text(&text),
                         path: Some(file.path().to_path_buf()),
@@ -211,6 +520,14 @@ impl Document {
 
     pub fn mode_reason(&self) -> &str {
         &self.mode_reason
+    }
+
+    pub fn internal_engine_profile(&self) -> InternalEngineProfile {
+        self.internal_engine
+    }
+
+    pub fn user_notice(&self) -> Option<&str> {
+        self.user_notice.as_deref()
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -363,7 +680,19 @@ impl Document {
             .metadata()
             .map(|metadata| format!(" {} bytes", metadata.len))
             .unwrap_or_default();
-        format!("{}{} - {}{}", self.title, dirty, self.mode.label(), size)
+        let notice = self
+            .user_notice
+            .as_deref()
+            .map(|notice| format!(" - {notice}"))
+            .unwrap_or_default();
+        format!(
+            "{}{} - {}{}{}",
+            self.title,
+            dirty,
+            self.mode.label(),
+            notice,
+            size
+        )
     }
 }
 
@@ -814,7 +1143,23 @@ impl CommandRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fastpad_file::{detect_file_kind, inspect_sample};
     use std::io::Write;
+    use std::path::PathBuf;
+
+    fn metadata_for(path: &str, len: u64, sample: &[u8]) -> FileMetadata {
+        let intelligence = inspect_sample(sample);
+        let path = PathBuf::from(path);
+        let kind = detect_file_kind(&path, &intelligence);
+        FileMetadata {
+            path,
+            len,
+            readonly: false,
+            modified: None,
+            kind,
+            intelligence,
+        }
+    }
 
     #[test]
     fn chooses_analysis_for_large_files() {
@@ -829,6 +1174,124 @@ mod tests {
             ModeManager::new(settings).choose_for_open(file.metadata(), OpenIntent::default());
 
         assert_eq!(decision.mode, EditorMode::ViewAnalysis);
+    }
+
+    #[test]
+    fn adaptive_selection_treats_small_file_with_extreme_line_as_analysis() {
+        let sample = vec![b'x'; 40 * 1024];
+        let metadata = metadata_for("single-line.txt", 20 * 1024 * 1024, &sample);
+        let settings = AppSettings {
+            huge_line_bytes: 32 * 1024,
+            ..Default::default()
+        };
+
+        let decision = ModeManager::new(settings).choose_for_open_with_system(
+            &metadata,
+            OpenIntent::default(),
+            SystemMemoryStatus::unconstrained_for_tests(),
+        );
+
+        assert_eq!(decision.mode, EditorMode::ViewAnalysis);
+        assert_eq!(
+            decision.internal_engine,
+            InternalEngineProfile::HugeFileAnalysis
+        );
+        assert!(decision.reason.contains("long line"));
+    }
+
+    #[test]
+    fn adaptive_selection_keeps_large_source_in_edit_mode_when_safe_to_load() {
+        let metadata = metadata_for("main.rs", 300 * 1024 * 1024, b"fn main() {}\n");
+
+        let decision = ModeManager::new(AppSettings::default()).choose_for_open_with_system(
+            &metadata,
+            OpenIntent::default(),
+            SystemMemoryStatus::unconstrained_for_tests(),
+        );
+
+        assert_eq!(decision.mode, EditorMode::Edit);
+        assert_eq!(
+            decision.internal_engine,
+            InternalEngineProfile::LargeOptimizedEdit
+        );
+        assert_eq!(
+            decision.user_notice.as_deref(),
+            Some("Large File Optimizations Enabled")
+        );
+    }
+
+    #[test]
+    fn adaptive_selection_routes_huge_csv_to_structured_analysis() {
+        let metadata = metadata_for("events.csv", 5 * 1024 * 1024 * 1024, b"a,b\n1,2\n");
+
+        let decision = ModeManager::new(AppSettings::default()).choose_for_open_with_system(
+            &metadata,
+            OpenIntent::default(),
+            SystemMemoryStatus::unconstrained_for_tests(),
+        );
+
+        assert_eq!(decision.mode, EditorMode::ViewAnalysis);
+        assert_eq!(
+            decision.internal_engine,
+            InternalEngineProfile::StructuredDataAnalysis
+        );
+    }
+
+    #[test]
+    fn adaptive_selection_uses_binary_inspection_for_binary_content() {
+        let metadata = metadata_for("capture.bin", 8 * 1024, &[0, 1, 2, 3, 0, 0, 0, 0]);
+
+        let decision = ModeManager::new(AppSettings::default()).choose_for_open_with_system(
+            &metadata,
+            OpenIntent::default(),
+            SystemMemoryStatus::unconstrained_for_tests(),
+        );
+
+        assert_eq!(decision.mode, EditorMode::ViewAnalysis);
+        assert_eq!(
+            decision.internal_engine,
+            InternalEngineProfile::BinaryInspection
+        );
+    }
+
+    #[test]
+    fn adaptive_selection_considers_memory_pressure() {
+        let metadata = metadata_for("main.rs", 300 * 1024 * 1024, b"fn main() {}\n");
+        let system = SystemMemoryStatus {
+            available_bytes: Some(400 * 1024 * 1024),
+            total_bytes: Some(8 * 1024 * 1024 * 1024),
+            pressure: MemoryPressure::Critical,
+        };
+
+        let decision = ModeManager::new(AppSettings::default()).choose_for_open_with_system(
+            &metadata,
+            OpenIntent::default(),
+            system,
+        );
+
+        assert_eq!(decision.mode, EditorMode::ViewAnalysis);
+        assert!(decision.reason.contains("memory"));
+    }
+
+    #[test]
+    fn force_edit_preserves_user_intent_and_marks_warning() {
+        let metadata = metadata_for("server.log", 3 * 1024 * 1024 * 1024, b"line\n");
+
+        let decision = ModeManager::new(AppSettings::default()).choose_for_open_with_system(
+            &metadata,
+            OpenIntent {
+                force_analysis: false,
+                force_edit: true,
+            },
+            SystemMemoryStatus::unconstrained_for_tests(),
+        );
+
+        assert_eq!(decision.mode, EditorMode::Edit);
+        assert_eq!(
+            decision.internal_engine,
+            InternalEngineProfile::StreamingEdit
+        );
+        assert!(decision.requires_huge_edit_warning);
     }
 
     #[test]

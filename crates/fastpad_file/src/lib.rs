@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DEFAULT_SAMPLE_SIZE: usize = 64 * 1024;
+pub const DEFAULT_LONG_LINE_WARNING_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ByteOffset(pub u64);
@@ -56,6 +57,20 @@ pub enum EncodingHint {
     Binary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    Binary,
+    Csv,
+    Json,
+    Log,
+    SourceCode,
+    SqlDump,
+    Tsv,
+    Xml,
+    Text,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileIntelligence {
     pub encoding: EncodingHint,
@@ -64,6 +79,9 @@ pub struct FileIntelligence {
     pub has_bom: bool,
     pub likely_text: bool,
     pub very_long_line_warning: bool,
+    pub sampled_line_count: usize,
+    pub longest_line_bytes: usize,
+    pub average_line_bytes: usize,
     pub sample_bytes: usize,
 }
 
@@ -73,6 +91,7 @@ pub struct FileMetadata {
     pub len: u64,
     pub readonly: bool,
     pub modified: Option<SystemTime>,
+    pub kind: FileKind,
     pub intelligence: FileIntelligence,
 }
 
@@ -117,6 +136,7 @@ impl FileHandle {
         let len = raw_metadata.len();
         let sample = read_sample(&file, min(options.sample_size as u64, len) as usize)?;
         let intelligence = inspect_sample(&sample);
+        let kind = detect_file_kind(&path, &intelligence);
         let mmap = if options.prefer_mmap && len > 0 && raw_metadata.is_file() {
             // SAFETY: The map is read-only and tied to a file handle stored on FileHandle.
             unsafe { MmapOptions::new().map(&file).ok() }
@@ -128,6 +148,7 @@ impl FileHandle {
             len,
             readonly: raw_metadata.permissions().readonly(),
             modified: raw_metadata.modified().ok(),
+            kind,
             intelligence,
         };
 
@@ -266,7 +287,8 @@ pub fn inspect_sample(sample: &[u8]) -> FileIntelligence {
     let binary_confidence = detect_binary_confidence(sample);
     let line_ending = detect_line_ending(sample);
     let likely_text = !matches!(encoding, EncodingHint::Binary) && binary_confidence < 0.25;
-    let very_long_line_warning = longest_line_in_sample(sample) > 32 * 1024;
+    let line_stats = sample_line_stats(sample);
+    let very_long_line_warning = line_stats.longest_line_bytes > DEFAULT_LONG_LINE_WARNING_BYTES;
 
     FileIntelligence {
         encoding: if binary_confidence > 0.65 {
@@ -279,7 +301,38 @@ pub fn inspect_sample(sample: &[u8]) -> FileIntelligence {
         has_bom,
         likely_text,
         very_long_line_warning,
+        sampled_line_count: line_stats.line_count,
+        longest_line_bytes: line_stats.longest_line_bytes,
+        average_line_bytes: line_stats.average_line_bytes,
         sample_bytes: sample.len(),
+    }
+}
+
+pub fn detect_file_kind(path: &Path, intelligence: &FileIntelligence) -> FileKind {
+    if !intelligence.likely_text || matches!(intelligence.encoding, EncodingHint::Binary) {
+        return FileKind::Binary;
+    }
+
+    let Some(extension) = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+    else {
+        return FileKind::Text;
+    };
+
+    match extension.as_str() {
+        "csv" => FileKind::Csv,
+        "json" | "jsonl" => FileKind::Json,
+        "log" | "out" | "trace" => FileKind::Log,
+        "sql" | "dump" => FileKind::SqlDump,
+        "tsv" => FileKind::Tsv,
+        "xml" | "html" | "htm" => FileKind::Xml,
+        "c" | "cc" | "cpp" | "cs" | "css" | "go" | "h" | "hpp" | "java" | "js" | "jsx" | "kt"
+        | "lua" | "m" | "mm" | "php" | "py" | "rb" | "rs" | "scala" | "sh" | "swift" | "toml"
+        | "ts" | "tsx" | "yaml" | "yml" => FileKind::SourceCode,
+        "md" | "markdown" | "txt" | "text" => FileKind::Text,
+        _ => FileKind::Unknown,
     }
 }
 
@@ -351,14 +404,51 @@ fn detect_line_ending(sample: &[u8]) -> LineEnding {
     }
 }
 
-fn longest_line_in_sample(sample: &[u8]) -> usize {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleLineStats {
+    line_count: usize,
+    longest_line_bytes: usize,
+    average_line_bytes: usize,
+}
+
+fn sample_line_stats(sample: &[u8]) -> SampleLineStats {
+    if sample.is_empty() {
+        return SampleLineStats {
+            line_count: 0,
+            longest_line_bytes: 0,
+            average_line_bytes: 0,
+        };
+    }
+
+    let mut line_count = 0usize;
     let mut longest = 0usize;
     let mut start = 0usize;
-    for idx in memchr2_iter(b'\n', b'\r', sample) {
+    let mut line_bytes = 0usize;
+    let mut idx_iter = memchr2_iter(b'\n', b'\r', sample).peekable();
+    while let Some(idx) = idx_iter.next() {
         longest = longest.max(idx.saturating_sub(start));
-        start = idx + 1;
+        line_bytes += idx.saturating_sub(start);
+        line_count += 1;
+        if sample[idx] == b'\r' && sample.get(idx + 1) == Some(&b'\n') {
+            let _ = idx_iter.next_if_eq(&(idx + 1));
+            start = idx + 2;
+        } else {
+            start = idx + 1;
+        }
     }
-    longest.max(sample.len().saturating_sub(start))
+
+    if start < sample.len() {
+        let last_len = sample.len().saturating_sub(start);
+        longest = longest.max(last_len);
+        line_bytes += last_len;
+        line_count += 1;
+    }
+
+    SampleLineStats {
+        line_count,
+        longest_line_bytes: longest,
+        average_line_bytes: line_bytes / line_count.max(1),
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +470,9 @@ mod tests {
         let info = inspect_sample(b"a\nb\r\nc\rd");
         assert_eq!(info.line_ending, LineEnding::Mixed);
         assert!(info.likely_text);
+        assert_eq!(info.sampled_line_count, 4);
+        assert_eq!(info.longest_line_bytes, 1);
+        assert_eq!(info.average_line_bytes, 1);
     }
 
     #[test]
@@ -392,6 +485,35 @@ mod tests {
         assert_eq!(
             handle.read_entire_if_under(32).unwrap().unwrap(),
             b"123456789"
+        );
+    }
+
+    #[test]
+    fn detects_long_lines_from_sample_without_full_scan() {
+        let sample = vec![b'x'; DEFAULT_LONG_LINE_WARNING_BYTES + 1];
+        let info = inspect_sample(&sample);
+
+        assert!(info.very_long_line_warning);
+        assert_eq!(info.longest_line_bytes, DEFAULT_LONG_LINE_WARNING_BYTES + 1);
+        assert_eq!(info.sampled_line_count, 1);
+    }
+
+    #[test]
+    fn classifies_file_kind_from_extension_after_binary_check() {
+        let text_info = inspect_sample(b"a,b\n1,2\n");
+        assert_eq!(
+            detect_file_kind(Path::new("events.csv"), &text_info),
+            FileKind::Csv
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("main.rs"), &text_info),
+            FileKind::SourceCode
+        );
+
+        let binary_info = inspect_sample(&[0, 1, 2, 3, 0, 0, 0, 0]);
+        assert_eq!(
+            detect_file_kind(Path::new("events.csv"), &binary_info),
+            FileKind::Binary
         );
     }
 }

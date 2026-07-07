@@ -8,6 +8,7 @@ use cocoa::appkit::{
 use cocoa::base::{id, nil, BOOL, NO, YES};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRange, NSRect, NSSize, NSString};
 use fastpad_core::{AppSettings, DocumentManager, EditorMode, OpenIntent, TabSummary};
+use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
 use libc::c_char;
 use objc::declare::ClassDecl;
@@ -28,38 +29,65 @@ const NS_TERMINATE_NOW: i64 = 1;
 const NS_VIEW_WIDTH_SIZABLE: u64 = 2;
 const NS_VIEW_HEIGHT_SIZABLE: u64 = 16;
 const NS_VIEW_MIN_Y_MARGIN: u64 = 8;
+const VIRTUAL_FONT_SIZE: f64 = 13.0;
+const VIRTUAL_LINE_HEIGHT: f64 = 18.0;
+const VIRTUAL_TOP_PADDING: f64 = 6.0;
+const VIRTUAL_GUTTER_PADDING: f64 = 8.0;
+const VIRTUAL_GUTTER_CHAR_WIDTH: f64 = 8.0;
+const VIRTUAL_TEXT_PADDING: f64 = 10.0;
+const VIRTUAL_CHAR_WIDTH: f64 = 8.0;
 
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
     static NSFontAttributeName: id;
     static NSForegroundColorAttributeName: id;
     static NSBackgroundColorAttributeName: id;
+    fn NSRectFill(rect: NSRect);
 }
 
 struct AppState {
     manager: DocumentManager,
     window: id,
     tab_bar: id,
+    scroll_view: id,
     text_view: id,
+    virtual_view: id,
     status_field: id,
     last_presented_text: String,
 }
 
 impl AppState {
-    unsafe fn new(window: id, tab_bar: id, text_view: id, status_field: id) -> Self {
+    unsafe fn new(
+        window: id,
+        tab_bar: id,
+        scroll_view: id,
+        text_view: id,
+        virtual_view: id,
+        status_field: id,
+    ) -> Self {
         Self {
             manager: DocumentManager::new(AppSettings::default()),
             window,
             tab_bar,
+            scroll_view,
             text_view,
+            virtual_view,
             status_field,
             last_presented_text: String::new(),
         }
     }
 
     unsafe fn present_text(&mut self, text: String, editable: bool) {
+        set_scroll_document_view(self.scroll_view, self.text_view);
         set_text_view(self.text_view, &text, editable);
         self.last_presented_text = text;
+    }
+
+    unsafe fn present_render_plan(&mut self, plan: RenderPlan) {
+        let fallback_text = plan.to_plain_text();
+        set_virtual_render_plan(self.virtual_view, plan);
+        set_scroll_document_view(self.scroll_view, self.virtual_view);
+        self.last_presented_text = fallback_text;
     }
 
     unsafe fn open_path(&mut self, path: &Path) {
@@ -97,6 +125,7 @@ impl AppState {
         let view = self.manager.active_view_state().unwrap_or_default();
         let mut next_anchor = None;
         let mut rendered_anchor = view.anchor;
+        let mut render_plan = None;
         let mut doc = doc.write();
         let mode = doc.mode();
         let title = doc.title().to_string();
@@ -113,13 +142,27 @@ impl AppState {
         } else {
             match doc.viewport(ViewportRequest {
                 anchor: view.anchor,
-                max_lines: settings.initial_viewport_lines,
+                max_lines: analysis_viewport_line_budget(&settings),
                 max_bytes: settings.initial_viewport_bytes,
             }) {
                 Ok(viewport) => {
+                    let plan = RenderPlan::from_viewport_with_options(
+                        &viewport,
+                        analysis_render_options(&settings),
+                    );
                     rendered_anchor = ViewAnchor::Byte(viewport.start);
-                    next_anchor = Some(viewport.next_anchor());
-                    viewport.text()
+                    next_anchor = plan
+                        .next_anchor_byte
+                        .and_then(|byte| {
+                            viewport
+                                .lines
+                                .iter()
+                                .find(|line| line.end.0 == byte)
+                                .map(|line| ViewAnchor::Byte(line.end))
+                        })
+                        .or_else(|| Some(viewport.next_anchor()));
+                    render_plan = Some(plan);
+                    String::new()
                 }
                 Err(error) => {
                     self.show_error(&format!("Render failed: {error:#}"));
@@ -136,7 +179,11 @@ impl AppState {
             });
         }
 
-        self.present_text(text, mode == EditorMode::Edit);
+        if let Some(plan) = render_plan {
+            self.present_render_plan(plan);
+        } else {
+            self.present_text(text, mode == EditorMode::Edit);
+        }
         let tabs = self.manager.tab_summaries();
         set_window_title(self.window, &window_title(&title, &tabs));
         set_status(self.status_field, &status);
@@ -158,13 +205,26 @@ impl AppState {
         }
         match doc.viewport(ViewportRequest {
             anchor,
-            max_lines: settings.initial_viewport_lines,
+            max_lines: analysis_viewport_line_budget(&settings),
             max_bytes: settings.initial_viewport_bytes,
         }) {
             Ok(viewport) => {
+                let plan = RenderPlan::from_viewport_with_options(
+                    &viewport,
+                    analysis_render_options(&settings),
+                );
                 let rendered_anchor = ViewAnchor::Byte(viewport.start);
-                let next_anchor = viewport.next_anchor();
-                self.present_text(viewport.text(), false);
+                let next_anchor = plan
+                    .next_anchor_byte
+                    .and_then(|byte| {
+                        viewport
+                            .lines
+                            .iter()
+                            .find(|line| line.end.0 == byte)
+                            .map(|line| ViewAnchor::Byte(line.end))
+                    })
+                    .unwrap_or_else(|| viewport.next_anchor());
+                self.present_render_plan(plan);
                 set_status(self.status_field, &doc.status_line());
                 drop(doc);
                 self.manager.update_active_view_state(|view| {
@@ -403,11 +463,14 @@ fn main() {
         let delegate_class = app_delegate_class();
         let delegate: id = msg_send![delegate_class, new];
 
-        let (window, tab_bar, text_view, status_field) = create_main_window();
+        let (window, tab_bar, scroll_view, text_view, virtual_view, status_field) =
+            create_main_window();
         let state = Box::into_raw(Box::new(AppState::new(
             window,
             tab_bar,
+            scroll_view,
             text_view,
+            virtual_view,
             status_field,
         )));
         (*delegate).set_ivar("state", state as *mut c_void);
@@ -440,7 +503,7 @@ fn main() {
     }
 }
 
-unsafe fn create_main_window() -> (id, id, id, id) {
+unsafe fn create_main_window() -> (id, id, id, id, id, id) {
     let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(1080., 720.));
     let style = NSWindowStyleMask::NSTitledWindowMask
         | NSWindowStyleMask::NSClosableWindowMask
@@ -507,6 +570,8 @@ unsafe fn create_main_window() -> (id, id, id, id) {
     let _: () = msg_send![scroll, setDocumentView: text_view];
     content.addSubview_(scroll);
 
+    let virtual_view = create_virtual_text_view(scroll_frame);
+
     let status_field: id = msg_send![class!(NSTextField), alloc];
     let status_field: id = msg_send![status_field, initWithFrame: status_frame];
     let _: () = msg_send![status_field, setEditable: NO];
@@ -517,7 +582,14 @@ unsafe fn create_main_window() -> (id, id, id, id) {
         msg_send![status_field, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
     content.addSubview_(status_field);
 
-    (window, tab_bar, text_view, status_field)
+    (
+        window,
+        tab_bar,
+        scroll,
+        text_view,
+        virtual_view,
+        status_field,
+    )
 }
 
 unsafe fn build_menu(app: id, delegate: id) {
@@ -879,9 +951,71 @@ unsafe fn separator_item() -> id {
     msg_send![class!(NSMenuItem), separatorItem]
 }
 
+fn analysis_viewport_line_budget(settings: &AppSettings) -> usize {
+    settings
+        .initial_viewport_lines
+        .saturating_add(DEFAULT_OVERSCAN_LINES)
+        .max(1)
+}
+
+fn analysis_render_options(settings: &AppSettings) -> RenderOptions {
+    RenderOptions {
+        visible_line_count: settings.initial_viewport_lines.max(1),
+        overscan_lines: DEFAULT_OVERSCAN_LINES,
+        first_column: 0,
+        max_columns: DEFAULT_MAX_COLUMNS,
+        ..RenderOptions::default()
+    }
+}
+
 unsafe fn set_text_view(text_view: id, text: &str, editable: bool) {
     let _: () = msg_send![text_view, setString: ns_string(text)];
     let _: () = msg_send![text_view, setEditable: if editable { YES } else { NO }];
+}
+
+unsafe fn set_scroll_document_view(scroll_view: id, document_view: id) {
+    let current: id = msg_send![scroll_view, documentView];
+    if current != document_view {
+        let _: () = msg_send![scroll_view, setDocumentView: document_view];
+    }
+}
+
+#[derive(Debug, Default)]
+struct VirtualTextViewState {
+    plan: RenderPlan,
+}
+
+unsafe fn create_virtual_text_view(frame: NSRect) -> id {
+    let view_class = virtual_text_view_class();
+    let view: id = msg_send![view_class, alloc];
+    let view: id = msg_send![view, initWithFrame: frame];
+    let state = Box::into_raw(Box::new(VirtualTextViewState::default()));
+    (*view).set_ivar("state", state as *mut c_void);
+    let _: () =
+        msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+    view
+}
+
+unsafe fn set_virtual_render_plan(view: id, plan: RenderPlan) {
+    let state_ptr = *(*view).get_ivar::<*mut c_void>("state");
+    if state_ptr.is_null() {
+        return;
+    }
+
+    let state = &mut *(state_ptr as *mut VirtualTextViewState);
+    state.plan = plan;
+    let _: () = msg_send![view, setFrameSize: virtual_content_size(&state.plan)];
+    let _: () = msg_send![view, setNeedsDisplay: YES];
+}
+
+fn virtual_content_size(plan: &RenderPlan) -> NSSize {
+    let width = (plan.estimated_content_width_columns.max(80) as f64 * VIRTUAL_CHAR_WIDTH)
+        + VIRTUAL_GUTTER_PADDING
+        + VIRTUAL_TEXT_PADDING
+        + 24.0;
+    let height =
+        (plan.lines.len().max(1) as f64 * VIRTUAL_LINE_HEIGHT) + (VIRTUAL_TOP_PADDING * 2.0);
+    NSSize::new(width, height)
 }
 
 unsafe fn set_tab_bar(tab_bar: id, tabs: &[TabSummary]) {
@@ -1069,10 +1203,140 @@ fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
 
 fn window_title(title: &str, tabs: &[TabSummary]) -> String {
     let count = tabs.len();
-    let Some(active_index) = tabs.iter().position(|tab| tab.active).map(|index| index + 1) else {
+    let Some(active_index) = tabs
+        .iter()
+        .position(|tab| tab.active)
+        .map(|index| index + 1)
+    else {
         return format!("{title} - FastPad");
     };
     format!("{active_index}/{count} {title} - FastPad")
+}
+
+fn virtual_text_view_class() -> *const Class {
+    static REGISTER: Once = Once::new();
+    static mut CLASS: *const Class = ptr::null();
+    REGISTER.call_once(|| unsafe {
+        let superclass = class!(NSView);
+        let mut decl = ClassDecl::new("FastPadVirtualTextView", superclass).unwrap();
+        decl.add_ivar::<*mut c_void>("state");
+        decl.add_method(
+            sel!(drawRect:),
+            virtual_text_view_draw_rect as extern "C" fn(&Object, Sel, NSRect),
+        );
+        decl.add_method(
+            sel!(isFlipped),
+            virtual_text_view_is_flipped as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        CLASS = decl.register();
+    });
+    unsafe { CLASS }
+}
+
+extern "C" fn virtual_text_view_is_flipped(_this: &Object, _sel: Sel) -> BOOL {
+    YES
+}
+
+extern "C" fn virtual_text_view_draw_rect(this: &Object, _sel: Sel, dirty_rect: NSRect) {
+    unsafe {
+        let state_ptr = *this.get_ivar::<*mut c_void>("state");
+        if state_ptr.is_null() {
+            return;
+        }
+        let state = &*(state_ptr as *const VirtualTextViewState);
+
+        let background: id = msg_send![class!(NSColor), textBackgroundColor];
+        let _: () = msg_send![background, setFill];
+        NSRectFill(dirty_rect);
+
+        let gutter_width = state.plan.gutter_width_columns as f64 * VIRTUAL_GUTTER_CHAR_WIDTH;
+        if gutter_width > 0.0 {
+            let gutter_background: id = msg_send![class!(NSColor), controlBackgroundColor];
+            let _: () = msg_send![gutter_background, setFill];
+            NSRectFill(NSRect::new(
+                NSPoint::new(0.0, dirty_rect.origin.y),
+                NSSize::new(
+                    VIRTUAL_GUTTER_PADDING + gutter_width + VIRTUAL_TEXT_PADDING * 0.5,
+                    dirty_rect.size.height,
+                ),
+            ));
+
+            let separator: id = msg_send![class!(NSColor), separatorColor];
+            let _: () = msg_send![separator, setFill];
+            NSRectFill(NSRect::new(
+                NSPoint::new(
+                    VIRTUAL_GUTTER_PADDING + gutter_width + VIRTUAL_TEXT_PADDING * 0.5,
+                    dirty_rect.origin.y,
+                ),
+                NSSize::new(1.0, dirty_rect.size.height),
+            ));
+        }
+
+        let font: id = msg_send![class!(NSFont), userFixedPitchFontOfSize: VIRTUAL_FONT_SIZE];
+        let text_color: id = msg_send![class!(NSColor), labelColor];
+        let gutter_color: id = msg_send![class!(NSColor), secondaryLabelColor];
+        let text_attrs = text_attributes(font, text_color);
+        let gutter_attrs = text_attributes(font, gutter_color);
+
+        let visible_start = dirty_rect.origin.y.max(0.0);
+        let visible_end = (dirty_rect.origin.y + dirty_rect.size.height).max(visible_start);
+        let first_line =
+            ((visible_start - VIRTUAL_TOP_PADDING).max(0.0) / VIRTUAL_LINE_HEIGHT).floor() as usize;
+        let last_line =
+            (((visible_end - VIRTUAL_TOP_PADDING).max(0.0) / VIRTUAL_LINE_HEIGHT).ceil() as usize)
+                .saturating_add(1)
+                .min(state.plan.lines.len());
+
+        for line_index in first_line..last_line {
+            let Some(line) = state.plan.lines.get(line_index) else {
+                continue;
+            };
+            let y = VIRTUAL_TOP_PADDING + line_index as f64 * VIRTUAL_LINE_HEIGHT;
+
+            if state.plan.gutter_width_columns > 0 {
+                let number = line
+                    .display_line_number
+                    .map(|number| number.to_string())
+                    .unwrap_or_default();
+                let gutter = format!("{number:>width$}", width = state.plan.gutter_width_columns);
+                draw_string(
+                    &gutter,
+                    NSPoint::new(VIRTUAL_GUTTER_PADDING, y),
+                    gutter_attrs,
+                );
+            }
+
+            let mut text = String::new();
+            if line.continued_left {
+                text.push_str("...");
+            }
+            text.push_str(&line.visible_text);
+            if line.continued_right {
+                text.push_str("...");
+            }
+
+            let text_x = VIRTUAL_GUTTER_PADDING
+                + gutter_width
+                + if gutter_width > 0.0 {
+                    VIRTUAL_TEXT_PADDING
+                } else {
+                    0.0
+                };
+            draw_string(&text, NSPoint::new(text_x, y), text_attrs);
+        }
+    }
+}
+
+unsafe fn text_attributes(font: id, color: id) -> id {
+    let attrs: id = msg_send![class!(NSMutableDictionary), dictionary];
+    let _: () = msg_send![attrs, setObject: font forKey: NSFontAttributeName];
+    let _: () = msg_send![attrs, setObject: color forKey: NSForegroundColorAttributeName];
+    attrs
+}
+
+unsafe fn draw_string(text: &str, point: NSPoint, attributes: id) {
+    let value = ns_string(text);
+    let _: () = msg_send![value, drawAtPoint: point withAttributes: attributes];
 }
 
 fn app_delegate_class() -> *const Class {
@@ -1321,6 +1585,9 @@ mod tests {
             summary(2, "second.txt", true),
         ];
 
-        assert_eq!(window_title("second.txt", &tabs), "2/2 second.txt - FastPad");
+        assert_eq!(
+            window_title("second.txt", &tabs),
+            "2/2 second.txt - FastPad"
+        );
     }
 }

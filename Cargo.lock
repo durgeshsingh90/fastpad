@@ -144,6 +144,7 @@ dependencies = [
  "cocoa",
  "core-graphics",
  "fastpad_core",
+ "fastpad_render",
  "fastpad_viewport",
  "libc",
  "objc",
@@ -160,6 +161,7 @@ dependencies = [
  "fastpad_search",
  "fastpad_tasks",
  "fastpad_viewport",
+ "libc",
  "parking_lot",
  "serde",
  "tempfile",
@@ -223,6 +225,8 @@ dependencies = [
 name = "fastpad_render"
 version = "0.1.0"
 dependencies = [
+ "fastpad_file",
+ "fastpad_line_index",
  "fastpad_viewport",
  "serde",
 ]

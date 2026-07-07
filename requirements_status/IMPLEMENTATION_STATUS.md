@@ -44,8 +44,10 @@ Current implemented components:
 | Document lifecycle foundation | New, open, active document/tab, dirty state, save, save as, save copy |
 | Large-file file access | `fastpad_file` mmap/chunked reads, metadata/sample inspection, bounded reads |
 | View/Analysis mode foundation | Auto mode decision, read-only text view, viewport paging |
+| Adaptive engine selection foundation | Internal engine profiles selected from size, sampled line stats, file kind, encoding/binary detection, user intent, and macOS memory pressure while exposing only View/Analysis and Edit modes |
 | Lazy line index | `fastpad_line_index::LazyLineIndex` |
 | Viewport engine | `fastpad_viewport::ViewportEngine` |
+| Custom virtual renderer foundation | `fastpad_render` overscan render plans, line-number gutter data, horizontal long-line clipping, layout cache keys, and AppKit View/Analysis virtual view |
 | Search core | `fastpad_search` literal/regex chunk scanning with cancellation checks |
 | Edit buffer | `fastpad_edit` rope buffer, undo/redo transactions |
 | Replace core | `fastpad_replace` literal/regex replace and preview |
@@ -63,6 +65,15 @@ Recent verification performed before this report:
 - `./scripts/smoke_attached_files.sh`
 - `scripts/build_macos_app.sh && codesign --verify --deep --strict --verbose=2 FastPad.app`
 
+Latest verification after completing the adaptive-engine and renderer foundation items:
+
+- `cargo fmt --all`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets`
+- `scripts/build_macos_app.sh`
+- `codesign --verify --deep --strict --verbose=2 FastPad.app`
+- `./scripts/smoke_attached_files.sh`
+
 ## File-by-File Status
 
 ### 1. `Native_macOS_Text_Editor_Project_Objective.md`
@@ -74,15 +85,17 @@ Done:
 - Native macOS Rust app exists.
 - App is not Electron/browser/cloud based.
 - Two-mode architecture exists: View/Analysis Mode and Edit Mode.
+- Internal adaptive engine profiles now exist behind those two modes.
 - Large-file-friendly primitives exist: mmap/chunk reads, lazy line indexing, viewport extraction.
+- View/Analysis Mode now uses a custom AppKit virtual text view backed by bounded render plans instead of feeding the page through `NSTextView`.
 - Edit Mode has rope buffer, undo/redo, replace core, atomic save.
 - Native app bundle, icon, start script, and smoke tests exist.
 
 Not done:
 
 - Not yet fastest GUI text editor on macOS; no benchmark proof.
-- No custom virtual renderer yet.
-- UI still uses `NSTextView`.
+- Custom virtual renderer is still a foundation; overlay drawing, syntax spans, selections, and full smooth scrolling are not complete.
+- Edit Mode UI still uses `NSTextView`.
 - Search/filter/tail/statistics panels are not exposed.
 - Multi-cursor, block selection, syntax highlighting, folding, bookmarks, inspectors, and settings are missing.
 - Performance targets are not enforced by benchmarks or CI.
@@ -102,8 +115,8 @@ This file contains 410 requirements: 56 global requirements plus 354 module requ
 | MOD-005 Undo Redo Engine | 30% | 70% | Basic transactions. Missing grouping policy, memory limits, UI command integration. |
 | MOD-006 Cursor Engine | 0% | 100% | No dedicated cursor engine. |
 | MOD-007 Selection Engine | 0% | 100% | No dedicated selection/multi-selection engine. |
-| MOD-008 Rendering Pipeline | 15% | 85% | Render-plan data model only. No custom glyph/layout renderer. |
-| MOD-009 Viewport and Scrolling | 35% | 65% | Viewport extraction and Page Down. Missing smooth scroll/virtual renderer. |
+| MOD-008 Rendering Pipeline | 35% | 65% | Overscan render plans, line-number gutter data, horizontal clipping, layout cache keys, and AppKit read-only virtual view. Missing overlays, syntax spans, selection rendering, dirty-region repaint breadth, and mature glyph/layout cache. |
+| MOD-009 Viewport and Scrolling | 40% | 60% | Viewport extraction, Page Down, overscan render planning, and long-line horizontal clipping. Missing smooth scroll integration and full scroll model. |
 | MOD-010 Block / Column Selection Engine | 0% | 100% | Not implemented. |
 | MOD-011 Search Engine | 30% | 70% | Core literal/regex search with cancellation checks. Missing live UI/results/workspace search. |
 | MOD-012 Replace Engine | 25% | 75% | Core replace/preview. Missing full UI/workflow and View Mode transform/export. |
@@ -129,7 +142,7 @@ This overview maps to the same 24-module SRS as `fastpad_ai_native_complete_srs.
 Done:
 
 - Initial crate boundaries exist for many core systems.
-- Application shell, document manager, file engine, viewport, search, replace, edit buffer, task cancellation, and diagnostics foundations exist.
+- Application shell, document manager, file engine, viewport, custom render-plan foundation, search, replace, edit buffer, task cancellation, and diagnostics foundations exist.
 - Native menus show many Notepad++-style categories and placeholders.
 
 Not done:
@@ -137,7 +150,7 @@ Not done:
 - Most complete module contracts are not finished.
 - Many UI surfaces are placeholders or not exposed.
 - No plugin/LSP/Git/macro/workspace systems.
-- No custom renderer, syntax highlighting, folding, block selection, or multi-cursor.
+- No syntax highlighting, folding, block selection, multi-cursor, or complete overlay renderer.
 
 ### 4. `fastpad_big_text_analysis_requirements.json`
 
@@ -192,16 +205,16 @@ This file contains 109 requirements across 12 engineering modules.
 
 | Module | Approx. Done | Approx. Left | Current status |
 |---|---:|---:|---|
-| ENG-001 Mode Manager | 45% | 55% | Two modes, auto mode decision, edit gating. Missing explicit conversion flow and huge-edit confirmation UI. |
+| ENG-001 Mode Manager | 55% | 45% | Two user-facing modes, adaptive internal engine profiles, sampled file intelligence, memory-pressure-aware selection, edit gating. Missing explicit conversion flow and huge-edit confirmation UI. |
 | ENG-002 Unix-Style File Engine | 45% | 55% | mmap/chunk reads, byte ranges, tail window, atomic save. Missing robust watch/rotation/fallback policies. |
 | ENG-003 Lazy Line Index | 40% | 60% | Lazy index and visible-region/offset discovery. Missing persistence/progress UI/mixed-ending warnings. |
-| ENG-004 Viewport and Pager Engine | 40% | 60% | Viewport extraction and Page Down. Missing smooth GUI scrolling and long-line virtualization. |
+| ENG-004 Viewport and Pager Engine | 45% | 55% | Viewport extraction, Page Down, and horizontal long-line clipping in the render plan. Missing smooth GUI scrolling and full scroll state. |
 | ENG-005 Streaming Search and Grep Engine | 35% | 65% | Literal/regex/case/whole-word/bounded results. Missing progressive callbacks/UI, count-only/invert/export features. |
 | ENG-006 Tail Follow Engine | 25% | 75% | Follow offset, pause/resume, truncation detection. Missing rotation detection and UI. |
 | ENG-007 Filter, Awk and Pipeline Engine | 25% | 75% | Contains/regex/invert/extract/head. Missing sort/uniq/wc/group/count/export and visual builder. |
 | ENG-008 Edit Buffer Engine | 35% | 65% | Rope buffer, insert/delete/replace, undo/redo, atomic save. Missing block selection, multi-cursor, line operations. |
 | ENG-009 Replace and Sed-Like Transform Engine | 30% | 70% | Replace all, regex captures, preview, one undo transaction. Missing View Mode transforms/export/cancellation UI. |
-| ENG-010 Rendering Engine | 10% | 90% | RenderPlan model only. Missing actual custom renderer. |
+| ENG-010 Rendering Engine | 35% | 65% | Custom visible-only AppKit virtual view, overscan render plans, gutters, horizontal clipping, and layout cache keys. Missing overlays, syntax spans, selection/block rendering, dirty-region repaint breadth, and mature glyph shaping/layout cache. |
 | ENG-011 Task Scheduler and Cancellation | 25% | 75% | Cancellation token and task handle. Missing priority queues, task panel, throttling integration. |
 | ENG-012 Diagnostics and Benchmarking | 15% | 85% | Metrics/timers only. Missing benchmark suite, memory diagnostics, CI gates. |
 
@@ -220,7 +233,7 @@ Not done:
 - UI thread still has synchronous open/render paths in places.
 - Expensive operations are not all integrated as background UI tasks.
 - No benchmark proof for startup/open/search/memory budgets.
-- No true custom viewport renderer.
+- Custom viewport renderer foundation is not yet a full production renderer.
 - No complete follow/filter/pipeline/statistics UI.
 
 ## Notepad++-Style Menu Catalog Status
@@ -244,21 +257,24 @@ Not done:
 
 ## Highest-Risk Missing Work
 
+Completed next pending item:
+
+- Custom virtual renderer foundation for View/Analysis Mode: `fastpad_render` now produces bounded overscan render plans with gutter and horizontal clipping metadata, and the macOS app uses a custom read-only AppKit view for those plans.
+
 The following items block calling the application production-ready:
 
-1. Custom virtual renderer for huge files instead of `NSTextView`.
-2. Full async task integration so open/search/filter/indexing never block the UI.
-3. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
-4. Search/filter/tail UI with progressive results and cancellation controls.
-5. Close/reopen/recently closed tab lifecycle.
-6. Session restore: tabs, active tab, cursor/scroll, filters, search history, splits, bookmarks, zoom.
-7. File watching: external modification, deletion, truncation, log rotation.
-8. Dedicated cursor and selection engines.
-9. Block/column selection and multi-cursor editing.
-10. Syntax highlighting and code folding.
-11. Settings/theme/shortcut persistence and UI.
-12. Workspace/project search and folder panels.
-13. Plugin host, macro engine, LSP integration, and Git integration.
+1. Full async task integration so open/search/filter/indexing never block the UI.
+2. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
+3. Search/filter/tail UI with progressive results and cancellation controls.
+4. Close/reopen/recently closed tab lifecycle.
+5. Session restore: tabs, active tab, cursor/scroll, filters, search history, splits, bookmarks, zoom.
+6. File watching: external modification, deletion, truncation, log rotation.
+7. Dedicated cursor and selection engines.
+8. Block/column selection and multi-cursor editing.
+9. Syntax highlighting and code folding.
+10. Settings/theme/shortcut persistence and UI.
+11. Workspace/project search and folder panels.
+12. Plugin host, macro engine, LSP integration, and Git integration.
 
 ## Current Product Classification
 

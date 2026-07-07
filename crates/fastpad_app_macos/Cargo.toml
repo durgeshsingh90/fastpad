@@ -14,6 +14,7 @@ anyhow.workspace = true
 cocoa.workspace = true
 core-graphics.workspace = true
 fastpad_core = { path = "../fastpad_core" }
+fastpad_render = { path = "../fastpad_render" }
 fastpad_viewport = { path = "../fastpad_viewport" }
 libc.workspace = true
 objc.workspace = true

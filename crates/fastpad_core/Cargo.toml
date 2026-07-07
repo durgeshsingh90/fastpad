@@ -13,6 +13,7 @@ fastpad_line_index = { path = "../fastpad_line_index" }
 fastpad_search = { path = "../fastpad_search" }
 fastpad_tasks = { path = "../fastpad_tasks" }
 fastpad_viewport = { path = "../fastpad_viewport" }
+libc.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 thiserror.workspace = true
