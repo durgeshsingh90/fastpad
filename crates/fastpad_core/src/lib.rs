@@ -277,11 +277,27 @@ impl Document {
         }
     }
 
+    pub fn set_edit_text(&mut self, text: &str) -> Result<()> {
+        if self.full_text_for_editing()? == text {
+            return Ok(());
+        }
+        let buffer = self.edit_buffer_mut()?;
+        let len = buffer.len_chars();
+        buffer.replace(0..len, text)
+    }
+
     pub fn full_text_for_editing(&self) -> Result<String> {
         match &self.backing {
             DocumentBacking::Edit { buffer, .. } => Ok(buffer.text()),
             DocumentBacking::View { .. } => bail!("document is in View/Analysis Mode"),
         }
+    }
+
+    pub fn has_save_path(&self) -> bool {
+        matches!(
+            &self.backing,
+            DocumentBacking::Edit { path: Some(_), .. } | DocumentBacking::View { .. }
+        )
     }
 
     pub fn search(&self, query: &SearchQuery, cancel: &CancellationToken) -> Result<SearchSummary> {
@@ -305,6 +321,39 @@ impl Document {
                 buffer.mark_clean();
                 Ok(())
             }
+        }
+    }
+
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        match &mut self.backing {
+            DocumentBacking::View { .. } => bail!("cannot save a read-only analysis document"),
+            DocumentBacking::Edit {
+                buffer,
+                path: doc_path,
+                metadata,
+            } => {
+                let path = path.as_ref().to_path_buf();
+                atomic_write(&path, buffer.text().as_bytes())?;
+                let file = FileHandle::open(&path, FileOpenOptions::default())?;
+                *doc_path = Some(path.clone());
+                *metadata = Some(file.metadata().clone());
+                self.title = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string();
+                buffer.mark_clean();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn save_copy_as(&self, path: impl AsRef<Path>) -> Result<()> {
+        match &self.backing {
+            DocumentBacking::View { .. } => {
+                bail!("cannot save copy from read-only analysis document")
+            }
+            DocumentBacking::Edit { buffer, .. } => atomic_write(path, buffer.text().as_bytes()),
         }
     }
 
@@ -465,5 +514,19 @@ mod tests {
 
         assert_eq!(doc.mode(), EditorMode::Edit);
         assert_eq!(doc.full_text_for_editing().unwrap().lines().count(), 150);
+    }
+
+    #[test]
+    fn save_as_updates_path_and_marks_clean() {
+        let mut doc = Document::untitled(DocumentId(1));
+        doc.set_edit_text("hello").unwrap();
+        assert!(doc.is_dirty());
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        doc.save_as(tmp.path()).unwrap();
+
+        assert!(!doc.is_dirty());
+        assert!(doc.has_save_path());
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "hello");
     }
 }

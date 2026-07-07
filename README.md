@@ -10,7 +10,8 @@ The current repository is an MVP implementation scaffolded from the supplied SRS
 ## What Works Now
 
 - Native AppKit macOS window, menu bar, `Open...`, `Save`, and `Page Down`.
-- Notepad++-style menu categories are visible; unfinished commands are disabled until their engines/UI are implemented.
+- Notepad++-style menu categories are visible, including Macro, Run, and Plugins placeholders; unfinished commands are disabled until their engines/UI are implemented.
+- `Save As...`, `Save a Copy As...`, multi-file open, Finder Open With, and quit prompts for the active unsaved document.
 - Automatic mode selection based on file size/risk.
 - Read-only mmap/chunk file engine with bounded byte-range reads.
 - Lazy line index and visible-only viewport extraction.

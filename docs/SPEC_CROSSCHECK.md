@@ -72,8 +72,8 @@ Source: `fastpad_ai_native_complete_srs.json`
 
 | Module | Status | Current coverage |
 |---|---:|---|
-| MOD-001 Application Shell | Partial | Launch, native window, Notepad++-style native menu skeleton, New, Open, Save, Page Down. Missing multi-window, Finder Open With handling, safe mode, session restore, unsaved-change shutdown prompts, and implementations for many visible disabled menu commands. |
-| MOD-002 Document Manager | Partial | Single active document manager, dirty state, open/save path metadata. Missing tabs, close lifecycle, reload/external modification prompts, full metadata lifecycle. |
+| MOD-001 Application Shell | Partial | Launch, native window, Notepad++-style native menu skeleton, New, Open, multi-select Open, Finder Open With event hook, Save, Save As, Save Copy, quit prompt for active unsaved document, File Exit, visible Macro/Run/Plugins placeholders, Page Down. Missing multi-window, safe mode, session restore, and implementations for many visible disabled menu commands. |
+| MOD-002 Document Manager | Partial | Single active document manager, dirty state, open/save/save-as/save-copy path metadata. Missing tabs, close lifecycle, reload/external modification prompts, full metadata lifecycle. |
 | MOD-003 File Engine | Partial | File handles, metadata, sample encoding/line ending/binary detection, mmap, chunk reads, atomic writes. Missing file watch integration, backups, conversion APIs. |
 | MOD-004 Text Buffer | Partial | Rope edit buffer exists and is unit-tested. Missing broader editor-buffer API surface and integrations. |
 | MOD-005 Undo Redo Engine | Partial | Basic reversible transactions. Missing edit grouping policy, memory limits, command integration breadth. |
@@ -82,7 +82,7 @@ Source: `fastpad_ai_native_complete_srs.json`
 | MOD-008 Rendering Pipeline | Partial | Render-plan data model exists. No custom glyph/layout renderer, gutter rendering, or overlay rendering in UI. |
 | MOD-009 Viewport and Scrolling | Partial | Viewport extraction and Page Down exist. No full smooth scroll model or custom virtual renderer. |
 | MOD-010 Block / Column Selection Engine | Not implemented | No rectangular selection or multi-caret editing. |
-| MOD-011 Search Engine | Partial | Core literal/regex search with cancellation and chunk overlap. No search UI/live result panel/workspace search. |
+| MOD-011 Search Engine | Partial | Core literal/regex search with cancellation and chunk overlap; native AppKit find menu actions are routed to the text view. No custom search UI/live result panel/workspace search. |
 | MOD-012 Replace Engine | Partial | Core literal/regex replace and preview. No full UI or replace workflow. |
 | MOD-013 Syntax Highlighting Engine | Not implemented | No syntax highlighter. |
 | MOD-014 Code Folding Engine | Not implemented | No folding. |

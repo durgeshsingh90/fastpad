@@ -5,7 +5,10 @@ This MVP maps the supplied specs to implemented repository components.
 ## Implemented Core
 
 - `MODE-001` to `MODE-007`: represented by `EditorMode`, `ModeManager`, and `CommandRegistry` in `fastpad_core`.
-- `APP-008`: native macOS menu bar exists with Notepad++-style File/Edit/Search/View/Encoding/Language/Settings/Tools sections.
+- `APP-001`, `APP-002`: application launches with no file or one/multiple file arguments.
+- `APP-003`: Finder Open With events are routed through the app delegate.
+- `APP-006`: quit prompts before terminating when the active document has unsaved changes.
+- `APP-008`: native macOS menu bar exists with Notepad++-style File/Edit/Search/View/Encoding/Language/Settings/Tools sections plus visible Macro/Run/Plugins placeholders.
 - `FILE-001` to `FILE-005`, `FILE-009`, `FILE-010`: represented by `fastpad_file`.
 - `LINE-001` to `LINE-006`: represented by `fastpad_line_index`.
 - `VIEW-001` to `VIEW-006`: represented by `fastpad_viewport` and the AppKit `Page Down` command.
@@ -23,6 +26,7 @@ This MVP maps the supplied specs to implemented repository components.
 - Filter/pipeline builder.
 - File intelligence side panel.
 - Full implementation behind disabled Notepad++-style menu items.
+- Multiple independent windows and tabs.
 - Bookmarks, notes, and inspectors.
 - Tail-follow controls.
 - Performance dashboard.

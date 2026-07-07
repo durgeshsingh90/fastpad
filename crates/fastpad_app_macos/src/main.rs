@@ -20,6 +20,11 @@ use std::ptr;
 use std::sync::Once;
 
 const NS_MODAL_RESPONSE_OK: i64 = 1;
+const NS_ALERT_FIRST_BUTTON_RETURN: i64 = 1000;
+const NS_ALERT_SECOND_BUTTON_RETURN: i64 = 1001;
+const NS_ALERT_THIRD_BUTTON_RETURN: i64 = 1002;
+const NS_TERMINATE_CANCEL: i64 = 0;
+const NS_TERMINATE_NOW: i64 = 1;
 const NS_VIEW_WIDTH_SIZABLE: u64 = 2;
 const NS_VIEW_HEIGHT_SIZABLE: u64 = 16;
 const NS_VIEW_MIN_Y_MARGIN: u64 = 8;
@@ -30,6 +35,7 @@ struct AppState {
     text_view: id,
     status_field: id,
     next_anchor: Option<ViewAnchor>,
+    last_presented_text: String,
 }
 
 impl AppState {
@@ -40,7 +46,13 @@ impl AppState {
             text_view,
             status_field,
             next_anchor: None,
+            last_presented_text: String::new(),
         }
+    }
+
+    unsafe fn present_text(&mut self, text: String, editable: bool) {
+        set_text_view(self.text_view, &text, editable);
+        self.last_presented_text = text;
     }
 
     unsafe fn open_path(&mut self, path: &Path) {
@@ -65,7 +77,7 @@ impl AppState {
                                 self.next_anchor = Some(viewport.next_anchor());
                                 viewport.text()
                             };
-                            set_text_view(self.text_view, &text, mode == EditorMode::Edit);
+                            self.present_text(text, mode == EditorMode::Edit);
                             set_window_title(self.window, &format!("{} - FastPad", doc.title()));
                             set_status(self.status_field, &doc.status_line());
                         }
@@ -77,12 +89,22 @@ impl AppState {
         }
     }
 
+    unsafe fn open_paths<I>(&mut self, paths: I)
+    where
+        I: IntoIterator,
+        I::Item: AsRef<Path>,
+    {
+        for path in paths {
+            self.open_path(path.as_ref());
+        }
+    }
+
     unsafe fn new_document(&mut self) {
         let id = self.manager.new_untitled();
         if let Some(doc) = self.manager.get(id) {
             let doc = doc.read();
             self.next_anchor = None;
-            set_text_view(self.text_view, "", true);
+            self.present_text(String::new(), true);
             set_window_title(self.window, "Untitled - FastPad");
             set_status(self.status_field, &doc.status_line());
         }
@@ -107,39 +129,167 @@ impl AppState {
         }) {
             Ok(viewport) => {
                 self.next_anchor = Some(viewport.next_anchor());
-                set_text_view(self.text_view, &viewport.text(), false);
+                self.present_text(viewport.text(), false);
                 set_status(self.status_field, &doc.status_line());
             }
             Err(error) => self.show_error(&format!("Page failed: {error:#}")),
         }
     }
 
-    unsafe fn save_active(&mut self) {
+    unsafe fn sync_active_edit_buffer(&mut self) -> bool {
         let Some(doc) = self.manager.active() else {
-            return;
+            return true;
         };
         let mut doc = doc.write();
         if doc.mode() != EditorMode::Edit {
-            self.show_error("Save is disabled in View/Analysis Mode.");
-            return;
+            return true;
         }
         let ui_text = text_view_string(self.text_view);
-        match doc.edit_buffer_mut() {
-            Ok(buffer) => {
-                let len = buffer.len_chars();
-                if let Err(error) = buffer.replace(0..len, &ui_text) {
-                    self.show_error(&format!("Save failed: {error:#}"));
-                    return;
-                }
+        if let Err(error) = doc.set_edit_text(&ui_text) {
+            self.show_error(&format!("Sync failed: {error:#}"));
+            return false;
+        }
+        true
+    }
+
+    unsafe fn active_document_has_unsaved_changes(&self) -> bool {
+        let Some(doc) = self.manager.active() else {
+            return false;
+        };
+        let doc = doc.read();
+        if doc.mode() != EditorMode::Edit {
+            return false;
+        }
+        doc.is_dirty() || text_view_string(self.text_view) != self.last_presented_text
+    }
+
+    unsafe fn save_active(&mut self) -> bool {
+        let Some(doc) = self.manager.active() else {
+            return true;
+        };
+        {
+            let doc = doc.read();
+            if doc.mode() != EditorMode::Edit {
+                self.show_error("Save is disabled in View/Analysis Mode.");
+                return false;
+            }
+        }
+
+        if !self.sync_active_edit_buffer() {
+            return false;
+        }
+
+        let needs_save_as = {
+            let doc = doc.read();
+            !doc.has_save_path()
+        };
+        if needs_save_as {
+            return self.save_active_as();
+        }
+
+        let mut doc = doc.write();
+        match doc.save() {
+            Ok(()) => {
+                self.last_presented_text = text_view_string(self.text_view);
+                set_status(self.status_field, &doc.status_line());
+                true
             }
             Err(error) => {
                 self.show_error(&format!("Save failed: {error:#}"));
-                return;
+                false
             }
         }
-        match doc.save() {
-            Ok(()) => set_status(self.status_field, &doc.status_line()),
-            Err(error) => self.show_error(&format!("Save failed: {error:#}")),
+    }
+
+    unsafe fn save_active_as(&mut self) -> bool {
+        let Some(doc) = self.manager.active() else {
+            return true;
+        };
+        {
+            let doc = doc.read();
+            if doc.mode() != EditorMode::Edit {
+                self.show_error("Save As is disabled in View/Analysis Mode.");
+                return false;
+            }
+        }
+
+        if !self.sync_active_edit_buffer() {
+            return false;
+        }
+
+        let Some(path) = save_panel_path("Save As", doc.read().title()) else {
+            return false;
+        };
+
+        let mut doc = doc.write();
+        match doc.save_as(&path) {
+            Ok(()) => {
+                self.last_presented_text = text_view_string(self.text_view);
+                set_window_title(self.window, &format!("{} - FastPad", doc.title()));
+                set_status(self.status_field, &doc.status_line());
+                true
+            }
+            Err(error) => {
+                self.show_error(&format!("Save As failed: {error:#}"));
+                false
+            }
+        }
+    }
+
+    unsafe fn save_copy_as(&mut self) -> bool {
+        let Some(doc) = self.manager.active() else {
+            return true;
+        };
+        {
+            let doc = doc.read();
+            if doc.mode() != EditorMode::Edit {
+                self.show_error("Save a Copy As is disabled in View/Analysis Mode.");
+                return false;
+            }
+        }
+
+        if !self.sync_active_edit_buffer() {
+            return false;
+        }
+
+        let Some(path) = save_panel_path("Save a Copy As", doc.read().title()) else {
+            return false;
+        };
+
+        let doc = doc.read();
+        match doc.save_copy_as(&path) {
+            Ok(()) => {
+                set_status(self.status_field, "Saved copy.");
+                true
+            }
+            Err(error) => {
+                self.show_error(&format!("Save copy failed: {error:#}"));
+                false
+            }
+        }
+    }
+
+    unsafe fn confirm_terminate(&mut self) -> bool {
+        if !self.active_document_has_unsaved_changes() {
+            return true;
+        }
+
+        let alert: id = msg_send![class!(NSAlert), new];
+        let _: () = msg_send![alert, setMessageText: ns_string("Save changes before quitting?")];
+        let _: () = msg_send![
+            alert,
+            setInformativeText: ns_string("The active document has unsaved changes.")
+        ];
+        let _: id = msg_send![alert, addButtonWithTitle: ns_string("Save")];
+        let _: id = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
+        let _: id = msg_send![alert, addButtonWithTitle: ns_string("Quit Without Saving")];
+        let response: i64 = msg_send![alert, runModal];
+
+        match response {
+            NS_ALERT_FIRST_BUTTON_RETURN => self.save_active(),
+            NS_ALERT_SECOND_BUTTON_RETURN => false,
+            NS_ALERT_THIRD_BUTTON_RETURN => true,
+            _ => false,
         }
     }
 
@@ -150,9 +300,9 @@ impl AppState {
         );
     }
 
-    unsafe fn show_error(&self, message: &str) {
+    unsafe fn show_error(&mut self, message: &str) {
         set_status(self.status_field, message);
-        set_text_view(self.text_view, message, false);
+        self.present_text(message.to_string(), false);
     }
 }
 
@@ -174,9 +324,11 @@ fn main() {
         window.makeKeyAndOrderFront_(nil);
         app.activateIgnoringOtherApps_(YES);
 
-        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
-            (*state).open_path(&path);
-        } else {
+        let paths = std::env::args_os()
+            .skip(1)
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
             set_text_view(
                 text_view,
                 "FastPad\n\nUse File > Open... to inspect a text file.",
@@ -186,6 +338,8 @@ fn main() {
                 status_field,
                 "No document open - View/Analysis Mode opens huge files read-only",
             );
+        } else {
+            (*state).open_paths(paths);
         }
 
         app.run();
@@ -270,8 +424,18 @@ unsafe fn build_menu(app: id, delegate: id) {
     file_menu.addItem_(disabled_menu_item("Reload from Disk"));
     file_menu.addItem_(separator_item());
     file_menu.addItem_(menu_item("Save", "s", sel!(saveDocument:), delegate));
-    file_menu.addItem_(disabled_menu_item("Save As..."));
-    file_menu.addItem_(disabled_menu_item("Save a Copy As..."));
+    file_menu.addItem_(menu_item(
+        "Save As...",
+        "S",
+        sel!(saveDocumentAs:),
+        delegate,
+    ));
+    file_menu.addItem_(menu_item(
+        "Save a Copy As...",
+        "",
+        sel!(saveCopyAs:),
+        delegate,
+    ));
     file_menu.addItem_(disabled_menu_item("Save All"));
     file_menu.addItem_(disabled_menu_item("Rename..."));
     file_menu.addItem_(separator_item());
@@ -283,6 +447,8 @@ unsafe fn build_menu(app: id, delegate: id) {
     file_menu.addItem_(disabled_menu_item("Load Session..."));
     file_menu.addItem_(disabled_menu_item("Save Session..."));
     file_menu.addItem_(disabled_menu_item("Print..."));
+    file_menu.addItem_(separator_item());
+    file_menu.addItem_(menu_item("Exit", "", sel!(terminate:), nil));
 
     let edit_menu = add_menu(menubar, "Edit");
     edit_menu.addItem_(menu_item("Undo", "z", sel!(undo:), nil));
@@ -305,10 +471,10 @@ unsafe fn build_menu(app: id, delegate: id) {
     edit_menu.addItem_(disabled_menu_item("Parameter Hint"));
 
     let search_menu = add_menu(menubar, "Search");
-    search_menu.addItem_(placeholder_menu_item("Find...", "f", delegate));
-    search_menu.addItem_(placeholder_menu_item("Find Next", "g", delegate));
-    search_menu.addItem_(placeholder_menu_item("Find Previous", "G", delegate));
-    search_menu.addItem_(placeholder_menu_item("Replace...", "h", delegate));
+    search_menu.addItem_(find_menu_item("Find...", "f", 1));
+    search_menu.addItem_(find_menu_item("Find Next", "g", 2));
+    search_menu.addItem_(find_menu_item("Find Previous", "G", 3));
+    search_menu.addItem_(disabled_menu_item("Replace..."));
     search_menu.addItem_(disabled_menu_item("Find in Files..."));
     search_menu.addItem_(disabled_menu_item("Find in Projects..."));
     search_menu.addItem_(disabled_menu_item("Incremental Search"));
@@ -374,12 +540,48 @@ unsafe fn build_menu(app: id, delegate: id) {
         "Plugin Admin...",
         "Plugins",
         "MD5",
-        "SHA Tools",
+        "SHA tools via plugins",
+        "Compare via plugin",
+        "XML tools via plugin",
+        "JSON tools via plugin",
+    ] {
+        tools_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let macro_menu = add_menu(menubar, "Macro");
+    for item in [
+        "Start Recording",
+        "Stop Recording",
+        "Playback",
+        "Save Current Recorded Macro...",
+        "Run a Macro Multiple Times...",
+        "Modify Shortcut/Delete Macro...",
+    ] {
+        macro_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let run_menu = add_menu(menubar, "Run");
+    for item in [
+        "Run...",
+        "Launch in Browser",
+        "Get PHP Help",
+        "Wikipedia Search",
+    ] {
+        run_menu.addItem_(disabled_menu_item(item));
+    }
+
+    let plugins_menu = add_menu(menubar, "Plugins");
+    for item in [
+        "Plugin Admin...",
+        "Open Plugins Folder",
+        "MIME Tools",
+        "Converter",
+        "NppExport",
         "Compare",
         "XML Tools",
         "JSON Tools",
     ] {
-        tools_menu.addItem_(disabled_menu_item(item));
+        plugins_menu.addItem_(disabled_menu_item(item));
     }
 
     let window_menu = add_menu(menubar, "Window");
@@ -509,6 +711,12 @@ unsafe fn placeholder_menu_item(title: &str, key: &str, target: id) -> id {
     menu_item(title, key, sel!(showNotImplemented:), target)
 }
 
+unsafe fn find_menu_item(title: &str, key: &str, tag: i64) -> id {
+    let item = menu_item(title, key, sel!(performFindPanelAction:), nil);
+    let _: () = msg_send![item, setTag: tag];
+    item
+}
+
 unsafe fn disabled_menu_item(title: &str) -> id {
     let item = menu_item(title, "", sel!(showNotImplemented:), nil);
     let _: () = msg_send![item, setEnabled: NO];
@@ -535,6 +743,40 @@ unsafe fn set_window_title(window: id, title: &str) {
 unsafe fn text_view_string(text_view: id) -> String {
     let ns_string_obj: id = msg_send![text_view, string];
     nsstring_to_string(ns_string_obj)
+}
+
+unsafe fn save_panel_path(title: &str, default_name: &str) -> Option<PathBuf> {
+    let panel: id = msg_send![class!(NSSavePanel), savePanel];
+    let _: () = msg_send![panel, setTitle: ns_string(title)];
+    let _: () = msg_send![panel, setNameFieldStringValue: ns_string(default_name)];
+    let response: i64 = msg_send![panel, runModal];
+    if response != NS_MODAL_RESPONSE_OK {
+        return None;
+    }
+    let url: id = msg_send![panel, URL];
+    let path: id = msg_send![url, path];
+    Some(PathBuf::from(nsstring_to_string(path)))
+}
+
+unsafe fn paths_from_url_array(urls: id) -> Vec<PathBuf> {
+    let count: usize = msg_send![urls, count];
+    let mut paths = Vec::with_capacity(count);
+    for idx in 0..count {
+        let url: id = msg_send![urls, objectAtIndex: idx];
+        let path: id = msg_send![url, path];
+        paths.push(PathBuf::from(nsstring_to_string(path)));
+    }
+    paths
+}
+
+unsafe fn paths_from_nsstring_array(values: id) -> Vec<PathBuf> {
+    let count: usize = msg_send![values, count];
+    let mut paths = Vec::with_capacity(count);
+    for idx in 0..count {
+        let path: id = msg_send![values, objectAtIndex: idx];
+        paths.push(PathBuf::from(nsstring_to_string(path)));
+    }
+    paths
 }
 
 unsafe fn ns_string(text: &str) -> id {
@@ -573,6 +815,14 @@ fn app_delegate_class() -> *const Class {
             save_document as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(saveDocumentAs:),
+            save_document_as as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(saveCopyAs:),
+            save_copy_as as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(pageDownDocument:),
             page_down_document as extern "C" fn(&Object, Sel, id),
         );
@@ -581,8 +831,16 @@ fn app_delegate_class() -> *const Class {
             show_not_implemented as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(applicationShouldTerminate:),
+            application_should_terminate as extern "C" fn(&Object, Sel, id) -> i64,
+        );
+        decl.add_method(
             sel!(applicationShouldTerminateAfterLastWindowClosed:),
             should_terminate_after_last_window_closed as extern "C" fn(&Object, Sel, id) -> BOOL,
+        );
+        decl.add_method(
+            sel!(application:openFiles:),
+            application_open_files as extern "C" fn(&Object, Sel, id, id),
         );
         CLASS = decl.register();
     });
@@ -605,14 +863,13 @@ extern "C" fn open_document(this: &Object, _: Sel, _: id) {
         let panel: id = msg_send![class!(NSOpenPanel), openPanel];
         let _: () = msg_send![panel, setCanChooseFiles: YES];
         let _: () = msg_send![panel, setCanChooseDirectories: NO];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: YES];
         let response: i64 = msg_send![panel, runModal];
         if response != NS_MODAL_RESPONSE_OK {
             return;
         }
-        let url: id = msg_send![panel, URL];
-        let path: id = msg_send![url, path];
-        let rust_path = nsstring_to_string(path);
-        state.open_path(Path::new(&rust_path));
+        let urls: id = msg_send![panel, URLs];
+        state.open_paths(paths_from_url_array(urls));
     }
 }
 
@@ -620,6 +877,22 @@ extern "C" fn save_document(this: &Object, _: Sel, _: id) {
     unsafe {
         if let Some(state) = state_from_delegate(this) {
             state.save_active();
+        }
+    }
+}
+
+extern "C" fn save_document_as(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.save_active_as();
+        }
+    }
+}
+
+extern "C" fn save_copy_as(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.save_copy_as();
         }
     }
 }
@@ -640,8 +913,30 @@ extern "C" fn show_not_implemented(this: &Object, _: Sel, _: id) {
     }
 }
 
+extern "C" fn application_should_terminate(this: &Object, _: Sel, _: id) -> i64 {
+    unsafe {
+        let Some(state) = state_from_delegate(this) else {
+            return NS_TERMINATE_NOW;
+        };
+        if state.confirm_terminate() {
+            NS_TERMINATE_NOW
+        } else {
+            NS_TERMINATE_CANCEL
+        }
+    }
+}
+
 extern "C" fn should_terminate_after_last_window_closed(_: &Object, _: Sel, _: id) -> BOOL {
     YES
+}
+
+extern "C" fn application_open_files(this: &Object, _: Sel, app: id, files: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.open_paths(paths_from_nsstring_array(files));
+        }
+        let _: () = msg_send![app, replyToOpenOrPrint: 0i64];
+    }
 }
 
 unsafe fn state_from_delegate<'a>(delegate: &Object) -> Option<&'a mut AppState> {
