@@ -1,0 +1,4153 @@
+{
+  "document_type": "TRUE_ENGINEERING_BLUEPRINT_FOR_UNIX_STYLE_FAST_TEXT_EDITOR",
+  "metadata": {
+    "product_name": "FastPad",
+    "version": "2.0.0-blueprint",
+    "created_date": "2026-07-07",
+    "target_platform": "macOS",
+    "primary_language": "Rust",
+    "intended_for": [
+      "Codex",
+      "Rust engineering team",
+      "Product architecture"
+    ],
+    "objective": "Build a native macOS text editor that feels as fast as Unix tools such as less, more, tail, grep, awk, sort, uniq and sed while also supporting a practical edit mode."
+  },
+  "core_product_decision": {
+    "modes": [
+      {
+        "name": "ViewAnalysisMode",
+        "description": "Read-only, maximum-speed mode for opening, viewing, searching, filtering, following, inspecting and analyzing very large files.",
+        "unix_inspiration": [
+          "less",
+          "more",
+          "tail -f",
+          "grep",
+          "awk",
+          "wc",
+          "sort",
+          "uniq",
+          "head"
+        ],
+        "default_for": [
+          "Files >= 512 MB",
+          "Files opened explicitly as read-only",
+          "Logs",
+          "Dumps",
+          "Huge CSV/JSON/XML/SQL files"
+        ],
+        "editing": "disabled",
+        "undo_redo": "not required",
+        "save": "not allowed except export/copy/extract pipeline results",
+        "performance_model": "mmap or streaming + lazy line index + visible viewport only"
+      },
+      {
+        "name": "EditMode",
+        "description": "Editable mode for normal and medium files with safe writes, undo/redo, syntax highlighting, search/replace, multi-cursor and block selection.",
+        "unix_inspiration": [
+          "vi",
+          "sed",
+          "grep",
+          "awk"
+        ],
+        "default_for": [
+          "New files",
+          "Small/medium text files",
+          "User explicitly chooses editable mode"
+        ],
+        "editing": "enabled",
+        "undo_redo": "required",
+        "save": "atomic write required",
+        "performance_model": "rope or piece table buffer + incremental rendering + background parsing"
+      }
+    ],
+    "explicit_rule": "There are only two user-facing modes: View/Analysis Mode and Edit Mode."
+  },
+  "unix_principles_to_adapt": [
+    {
+      "principle": "Do not read the entire file unless needed",
+      "used_by": [
+        "less",
+        "more",
+        "tail"
+      ],
+      "application_rule": "Opening a huge file should only read metadata and the bytes required for the first viewport."
+    },
+    {
+      "principle": "Stream sequentially for search and analysis",
+      "used_by": [
+        "grep",
+        "awk",
+        "sed",
+        "wc"
+      ],
+      "application_rule": "Search, filters, extraction, stats and pipelines operate chunk-by-chunk and emit results progressively."
+    },
+    {
+      "principle": "Use byte offsets as stable positions",
+      "used_by": [
+        "grep",
+        "tail",
+        "dd"
+      ],
+      "application_rule": "Large-file references should use byte offsets first, with line numbers built lazily."
+    },
+    {
+      "principle": "Small composable operations",
+      "used_by": [
+        "grep | awk | sort | uniq"
+      ],
+      "application_rule": "Analysis pipelines should compose filter, extract, transform, group, count and export stages."
+    },
+    {
+      "principle": "Progressive output",
+      "used_by": [
+        "tail -f",
+        "grep"
+      ],
+      "application_rule": "Results appear as soon as they are found; the user must not wait for complete scans."
+    },
+    {
+      "principle": "Avoid unnecessary parsing",
+      "used_by": [
+        "less",
+        "grep"
+      ],
+      "application_rule": "Syntax highlighting, full statistics, indexing and minimap are optional background tasks, never prerequisites for viewing."
+    },
+    {
+      "principle": "Pipeline cancellation",
+      "used_by": [
+        "Ctrl+C in shell"
+      ],
+      "application_rule": "Every long-running operation has a cancellation token and visible cancel button."
+    }
+  ],
+  "global_performance_budgets": {
+    "perceived_open_10gb_file_target_ms": 200,
+    "perceived_open_multiple_10gb_files_target": "Each file opens by metadata + mmap/stream handle + first viewport only; never full-read.",
+    "first_viewport_render_target_ms": 16,
+    "scroll_frame_budget_ms": 16,
+    "typing_latency_edit_mode_ms": 8,
+    "first_search_result_target_ms": 200,
+    "ui_freeze_max_ms": 16,
+    "ram_for_single_10gb_view_analysis_file_mb": "Target < 50-100 MB excluding OS page cache.",
+    "ram_scaling_rule": "RAM scales with visible regions, caches and indexes, not file size.",
+    "background_task_rule": "All background tasks must be cancellable and lower priority than UI."
+  },
+  "mode_state_machine": {
+    "states": [
+      "Closed",
+      "Opening",
+      "ViewAnalysisMode",
+      "EditMode",
+      "ConvertingMode",
+      "Saving",
+      "Reloading",
+      "Error"
+    ],
+    "transitions": [
+      {
+        "from": "Closed",
+        "to": "Opening",
+        "event": "open_file"
+      },
+      {
+        "from": "Opening",
+        "to": "ViewAnalysisMode",
+        "condition": "file_size_above_threshold OR user_requested_read_only OR file_is_log_dump"
+      },
+      {
+        "from": "Opening",
+        "to": "EditMode",
+        "condition": "file_size_safe_for_editing AND user_intent_edit"
+      },
+      {
+        "from": "ViewAnalysisMode",
+        "to": "ConvertingMode",
+        "event": "user_requests_edit"
+      },
+      {
+        "from": "ConvertingMode",
+        "to": "EditMode",
+        "condition": "file_loaded_into_edit_buffer_successfully"
+      },
+      {
+        "from": "ConvertingMode",
+        "to": "ViewAnalysisMode",
+        "condition": "conversion_cancelled_or_failed"
+      },
+      {
+        "from": "EditMode",
+        "to": "Saving",
+        "event": "save"
+      },
+      {
+        "from": "Saving",
+        "to": "EditMode",
+        "condition": "save_success"
+      },
+      {
+        "from": "ViewAnalysisMode",
+        "to": "Reloading",
+        "event": "file_changed_or_user_reload"
+      },
+      {
+        "from": "EditMode",
+        "to": "Reloading",
+        "event": "file_changed_and_user_confirms_reload"
+      },
+      {
+        "from": "Any",
+        "to": "Error",
+        "condition": "unrecoverable_file_or_permission_error"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "id": "ENG-001",
+      "name": "Mode Manager",
+      "purpose": "Owns the two user-facing modes and enforces capability differences between View/Analysis Mode and Edit Mode.",
+      "responsibilities": [
+        "Choose mode during open",
+        "Expose active capabilities",
+        "Block invalid commands in current mode",
+        "Convert View/Analysis Mode to Edit Mode when explicitly requested",
+        "Prevent accidental destructive operations on huge files"
+      ],
+      "requirements": [
+        {
+          "id": "MODE-001",
+          "title": "Only two user-facing modes exist: View/Analysis Mode and Edit Mode",
+          "priority": "MUST",
+          "details": "Only two user-facing modes exist: View/Analysis Mode and Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Only two user-facing modes exist: View/Analysis Mode and Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-002",
+          "title": "Open huge files directly in View/Analysis Mode by default",
+          "priority": "MUST",
+          "details": "Open huge files directly in View/Analysis Mode by default",
+          "acceptance_criteria": [
+            "The system implements: Open huge files directly in View/Analysis Mode by default.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-003",
+          "title": "Disable editing commands in View/Analysis Mode",
+          "priority": "MUST",
+          "details": "Disable editing commands in View/Analysis Mode",
+          "acceptance_criteria": [
+            "The system implements: Disable editing commands in View/Analysis Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-004",
+          "title": "Allow copy, search, filter, follow, inspect, bookmark, extract and export in View/Analysis Mode",
+          "priority": "MUST",
+          "details": "Allow copy, search, filter, follow, inspect, bookmark, extract and export in View/Analysis Mode",
+          "acceptance_criteria": [
+            "The system implements: Allow copy, search, filter, follow, inspect, bookmark, extract and export in View/Analysis Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-005",
+          "title": "Require explicit confirmation before converting huge file to Edit Mode",
+          "priority": "MUST",
+          "details": "Require explicit confirmation before converting huge file to Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Require explicit confirmation before converting huge file to Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-006",
+          "title": "Show current mode in status bar and title metadata",
+          "priority": "MUST",
+          "details": "Show current mode in status bar and title metadata",
+          "acceptance_criteria": [
+            "The system implements: Show current mode in status bar and title metadata.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-007",
+          "title": "Expose mode capabilities to command registry",
+          "priority": "MUST",
+          "details": "Expose mode capabilities to command registry",
+          "acceptance_criteria": [
+            "The system implements: Expose mode capabilities to command registry.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "MODE-008",
+          "title": "Do not allow plugin commands to bypass mode restrictions",
+          "priority": "MUST",
+          "details": "Do not allow plugin commands to bypass mode restrictions",
+          "acceptance_criteria": [
+            "The system implements: Do not allow plugin commands to bypass mode restrictions.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "MODE-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "MODE-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "ModeManager::select_mode(file_preflight, user_options) -> EditorMode",
+        "ModeManager::capabilities(document_id) -> CapabilitySet",
+        "ModeManager::request_edit_mode(document_id) -> ModeTransitionPlan",
+        "ModeManager::is_command_allowed(document_id, command_id) -> bool"
+      ],
+      "core_data_structures": [
+        "EditorMode = ViewAnalysis | Edit",
+        "CapabilitySet { can_edit, can_save, can_replace, can_search, can_filter, can_follow, can_export }",
+        "ModeTransitionPlan { estimated_memory, warnings, required_steps }"
+      ],
+      "algorithms": [
+        "Determine mode from size threshold, file type, user option and safety policy",
+        "Gate every command through capability check",
+        "Conversion requires building editable buffer and may be cancelled"
+      ],
+      "performance_budget": {
+        "mode_switch_validation_target_ms": 2
+      },
+      "edge_cases": [
+        "Plugin tries edit in View/Analysis Mode",
+        "User requests edit for 100GB file",
+        "File changes during conversion"
+      ]
+    },
+    {
+      "id": "ENG-002",
+      "name": "Unix-Style File Engine",
+      "purpose": "Provides mmap, streaming, chunked reads, byte-offset addressing and atomic writes.",
+      "responsibilities": [
+        "Metadata-only open path",
+        "Memory-map read-only files",
+        "Chunked streaming fallback",
+        "Lazy reading for first viewport",
+        "Atomic save for Edit Mode",
+        "Stable byte-offset references",
+        "File growth/truncation detection"
+      ],
+      "requirements": [
+        {
+          "id": "FILE-001",
+          "title": "Opening a file must never require reading the whole file",
+          "priority": "MUST",
+          "details": "Opening a file must never require reading the whole file",
+          "acceptance_criteria": [
+            "The system implements: Opening a file must never require reading the whole file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-002",
+          "title": "Use memory mapping for View/Analysis Mode when safe",
+          "priority": "MUST",
+          "details": "Use memory mapping for View/Analysis Mode when safe",
+          "acceptance_criteria": [
+            "The system implements: Use memory mapping for View/Analysis Mode when safe.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-003",
+          "title": "Use chunked streaming when mmap is unavailable or unsafe",
+          "priority": "MUST",
+          "details": "Use chunked streaming when mmap is unavailable or unsafe",
+          "acceptance_criteria": [
+            "The system implements: Use chunked streaming when mmap is unavailable or unsafe.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-004",
+          "title": "Read only enough bytes to render initial viewport",
+          "priority": "MUST",
+          "details": "Read only enough bytes to render initial viewport",
+          "acceptance_criteria": [
+            "The system implements: Read only enough bytes to render initial viewport.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-005",
+          "title": "Expose byte-offset based access API",
+          "priority": "MUST",
+          "details": "Expose byte-offset based access API",
+          "acceptance_criteria": [
+            "The system implements: Expose byte-offset based access API.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-006",
+          "title": "Support tail-like reads from end of file",
+          "priority": "MUST",
+          "details": "Support tail-like reads from end of file",
+          "acceptance_criteria": [
+            "The system implements: Support tail-like reads from end of file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-007",
+          "title": "Detect file growth for follow mode",
+          "priority": "MUST",
+          "details": "Detect file growth for follow mode",
+          "acceptance_criteria": [
+            "The system implements: Detect file growth for follow mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-008",
+          "title": "Detect truncation and log rotation",
+          "priority": "MUST",
+          "details": "Detect truncation and log rotation",
+          "acceptance_criteria": [
+            "The system implements: Detect truncation and log rotation.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-009",
+          "title": "Perform atomic writes in Edit Mode",
+          "priority": "MUST",
+          "details": "Perform atomic writes in Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Perform atomic writes in Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-009 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-009 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "FILE-010",
+          "title": "Never allocate buffer equal to file size in View/Analysis Mode",
+          "priority": "MUST",
+          "details": "Never allocate buffer equal to file size in View/Analysis Mode",
+          "acceptance_criteria": [
+            "The system implements: Never allocate buffer equal to file size in View/Analysis Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "FILE-010 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "FILE-010 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "FileEngine::preflight(path) -> FilePreflight",
+        "FileEngine::open_view(path) -> ViewFileHandle",
+        "FileEngine::open_edit(path) -> EditableLoadPlan",
+        "ViewFileHandle::read_at(offset, len) -> Bytes",
+        "ViewFileHandle::stream_from(offset, chunk_size) -> ChunkStream",
+        "ViewFileHandle::tail(bytes) -> Bytes",
+        "FileEngine::atomic_write(path, encoded_bytes, options) -> Result<()>"
+      ],
+      "core_data_structures": [
+        "FilePreflight { path, size_bytes, permissions, modified_at, inode, encoding_hint, binary_confidence }",
+        "ViewFileHandle { mmap_or_stream, size_snapshot, chunk_cache }",
+        "Chunk { start_offset, end_offset, bytes }",
+        "ByteRange { start, end }"
+      ],
+      "algorithms": [
+        "Open path -> metadata -> choose mmap or stream -> first viewport scan",
+        "Tail path -> seek near EOF -> scan backward for line boundaries",
+        "Read path -> check chunk cache -> mmap slice or disk read",
+        "Save path -> encode -> temp file -> fsync policy -> atomic rename"
+      ],
+      "performance_budget": {
+        "metadata_open_target_ms": 50,
+        "mmap_setup_target_ms": 100,
+        "first_viewport_data_target_ms": 100,
+        "atomic_save_requires_background_thread": true
+      },
+      "edge_cases": [
+        "Network files",
+        "Sparse files",
+        "File grows while mapped",
+        "File is truncated",
+        "Permission changes",
+        "Disk full"
+      ]
+    },
+    {
+      "id": "ENG-003",
+      "name": "Lazy Line Index",
+      "purpose": "Builds line-number to byte-offset mapping incrementally instead of scanning the full file upfront.",
+      "responsibilities": [
+        "Support visible-region line discovery",
+        "Support approximate total lines",
+        "Support jump to byte offset immediately",
+        "Support jump to line via progressive index",
+        "Persist optional index cache",
+        "Handle CRLF, LF and CR"
+      ],
+      "requirements": [
+        {
+          "id": "LINE-001",
+          "title": "Do not build full line index during open",
+          "priority": "MUST",
+          "details": "Do not build full line index during open",
+          "acceptance_criteria": [
+            "The system implements: Do not build full line index during open.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-002",
+          "title": "Build line index lazily for visible and searched regions",
+          "priority": "MUST",
+          "details": "Build line index lazily for visible and searched regions",
+          "acceptance_criteria": [
+            "The system implements: Build line index lazily for visible and searched regions.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-003",
+          "title": "Support byte offset navigation without full line index",
+          "priority": "MUST",
+          "details": "Support byte offset navigation without full line index",
+          "acceptance_criteria": [
+            "The system implements: Support byte offset navigation without full line index.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-004",
+          "title": "Support approximate percentage navigation",
+          "priority": "MUST",
+          "details": "Support approximate percentage navigation",
+          "acceptance_criteria": [
+            "The system implements: Support approximate percentage navigation.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-005",
+          "title": "Support progressive jump-to-line with progress feedback",
+          "priority": "MUST",
+          "details": "Support progressive jump-to-line with progress feedback",
+          "acceptance_criteria": [
+            "The system implements: Support progressive jump-to-line with progress feedback.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-006",
+          "title": "Cache line boundaries for visited chunks",
+          "priority": "MUST",
+          "details": "Cache line boundaries for visited chunks",
+          "acceptance_criteria": [
+            "The system implements: Cache line boundaries for visited chunks.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-007",
+          "title": "Invalidate line index safely when file changes",
+          "priority": "MUST",
+          "details": "Invalidate line index safely when file changes",
+          "acceptance_criteria": [
+            "The system implements: Invalidate line index safely when file changes.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "LINE-008",
+          "title": "Support mixed line endings with warnings",
+          "priority": "MUST",
+          "details": "Support mixed line endings with warnings",
+          "acceptance_criteria": [
+            "The system implements: Support mixed line endings with warnings.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "LINE-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "LINE-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "LineIndex::line_at_offset(offset) -> Option<LineRef>",
+        "LineIndex::offset_for_line(line_number) -> Async<Result<ByteOffset>>",
+        "LineIndex::index_range(byte_range) -> TaskId",
+        "LineIndex::estimate_total_lines() -> LineEstimate"
+      ],
+      "core_data_structures": [
+        "LineRef { optional_line_number, byte_start, byte_end, line_ending }",
+        "LineIndexSegment { byte_range, line_offsets, complete }",
+        "LineEstimate { estimated_lines, confidence }"
+      ],
+      "algorithms": [
+        "Scan chunk for newline bytes",
+        "Store relative offsets per segment",
+        "Merge adjacent complete segments",
+        "For jump-to-line, scan forward/backward from nearest indexed anchor"
+      ],
+      "performance_budget": {
+        "visible_range_index_target_ms": 16,
+        "background_full_index_low_priority": true
+      },
+      "edge_cases": [
+        "One 10GB single-line file",
+        "Mixed CRLF/LF",
+        "Invalid UTF-8",
+        "Jump to line beyond known index"
+      ]
+    },
+    {
+      "id": "ENG-004",
+      "name": "Viewport and Pager Engine",
+      "purpose": "Implements less/more-style paging in a GUI using visible-only rendering and byte/line anchors.",
+      "responsibilities": [
+        "Render only visible lines",
+        "Page up/down like more/less",
+        "Scroll using byte and line anchors",
+        "Preserve viewport around file changes",
+        "Support jump to top, bottom, percentage, byte offset and line"
+      ],
+      "requirements": [
+        {
+          "id": "VIEW-001",
+          "title": "Initial viewport renders without full-file scan",
+          "priority": "MUST",
+          "details": "Initial viewport renders without full-file scan",
+          "acceptance_criteria": [
+            "The system implements: Initial viewport renders without full-file scan.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-002",
+          "title": "Render only visible lines plus overscan",
+          "priority": "MUST",
+          "details": "Render only visible lines plus overscan",
+          "acceptance_criteria": [
+            "The system implements: Render only visible lines plus overscan.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-003",
+          "title": "Support page down and page up",
+          "priority": "MUST",
+          "details": "Support page down and page up",
+          "acceptance_criteria": [
+            "The system implements: Support page down and page up.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-004",
+          "title": "Support jump to start and end of file",
+          "priority": "MUST",
+          "details": "Support jump to start and end of file",
+          "acceptance_criteria": [
+            "The system implements: Support jump to start and end of file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-005",
+          "title": "Support jump to percentage of file",
+          "priority": "MUST",
+          "details": "Support jump to percentage of file",
+          "acceptance_criteria": [
+            "The system implements: Support jump to percentage of file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-006",
+          "title": "Support jump to byte offset",
+          "priority": "MUST",
+          "details": "Support jump to byte offset",
+          "acceptance_criteria": [
+            "The system implements: Support jump to byte offset.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-007",
+          "title": "Support jump to line with progressive indexing",
+          "priority": "MUST",
+          "details": "Support jump to line with progressive indexing",
+          "acceptance_criteria": [
+            "The system implements: Support jump to line with progressive indexing.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-008",
+          "title": "Scrolling must remain smooth while background tasks run",
+          "priority": "MUST",
+          "details": "Scrolling must remain smooth while background tasks run",
+          "acceptance_criteria": [
+            "The system implements: Scrolling must remain smooth while background tasks run.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "VIEW-009",
+          "title": "Extremely long lines must be horizontally virtualized",
+          "priority": "MUST",
+          "details": "Extremely long lines must be horizontally virtualized",
+          "acceptance_criteria": [
+            "The system implements: Extremely long lines must be horizontally virtualized.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "VIEW-009 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "VIEW-009 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "Viewport::open_at_offset(document_id, offset) -> ViewportSnapshot",
+        "Viewport::scroll(delta) -> ViewportSnapshot",
+        "Viewport::page(direction) -> ViewportSnapshot",
+        "Viewport::jump(target) -> TaskOrSnapshot"
+      ],
+      "core_data_structures": [
+        "ViewportAnchor { byte_offset, visual_line_offset, preferred_column }",
+        "ViewportSnapshot { visible_lines, overscan_lines, anchor, render_spans }",
+        "VisualLine { byte_range, display_text_slice, wrap_fragments }"
+      ],
+      "algorithms": [
+        "Find anchor line from byte offset",
+        "Scan forward enough lines to fill viewport",
+        "Overscan small region above/below viewport",
+        "Avoid measuring text outside viewport"
+      ],
+      "performance_budget": {
+        "scroll_frame_budget_ms": 16,
+        "page_operation_target_ms": 16
+      },
+      "edge_cases": [
+        "Huge line exceeds screen width",
+        "File changes while viewport active",
+        "Jump to unknown line number"
+      ]
+    },
+    {
+      "id": "ENG-005",
+      "name": "Streaming Search and Grep Engine",
+      "purpose": "Implements grep-like literal and regex search with progressive results and cancellation.",
+      "responsibilities": [
+        "Literal search",
+        "Regex search",
+        "Case options",
+        "Whole word",
+        "Context lines",
+        "Live results",
+        "Cancellation",
+        "Search in current file and workspace"
+      ],
+      "requirements": [
+        {
+          "id": "GREP-001",
+          "title": "Search starts immediately without full indexing",
+          "priority": "MUST",
+          "details": "Search starts immediately without full indexing",
+          "acceptance_criteria": [
+            "The system implements: Search starts immediately without full indexing.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-002",
+          "title": "Search emits results progressively",
+          "priority": "MUST",
+          "details": "Search emits results progressively",
+          "acceptance_criteria": [
+            "The system implements: Search emits results progressively.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-003",
+          "title": "First result target under 200ms when match is near current/early region",
+          "priority": "MUST",
+          "details": "First result target under 200ms when match is near current/early region",
+          "acceptance_criteria": [
+            "The system implements: First result target under 200ms when match is near current/early region.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-004",
+          "title": "Support literal search using fast algorithms",
+          "priority": "MUST",
+          "details": "Support literal search using fast algorithms",
+          "acceptance_criteria": [
+            "The system implements: Support literal search using fast algorithms.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-005",
+          "title": "Support regex search using streaming-safe engine",
+          "priority": "MUST",
+          "details": "Support regex search using streaming-safe engine",
+          "acceptance_criteria": [
+            "The system implements: Support regex search using streaming-safe engine.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-006",
+          "title": "Support chunk-boundary matches",
+          "priority": "MUST",
+          "details": "Support chunk-boundary matches",
+          "acceptance_criteria": [
+            "The system implements: Support chunk-boundary matches.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-007",
+          "title": "Support before/after context lines like grep -C",
+          "priority": "MUST",
+          "details": "Support before/after context lines like grep -C",
+          "acceptance_criteria": [
+            "The system implements: Support before/after context lines like grep -C.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-008",
+          "title": "Support invert match like grep -v",
+          "priority": "MUST",
+          "details": "Support invert match like grep -v",
+          "acceptance_criteria": [
+            "The system implements: Support invert match like grep -v.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-009",
+          "title": "Support count-only mode like grep -c",
+          "priority": "MUST",
+          "details": "Support count-only mode like grep -c",
+          "acceptance_criteria": [
+            "The system implements: Support count-only mode like grep -c.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-009 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-009 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-010",
+          "title": "Support match-only extraction like grep -o",
+          "priority": "MUST",
+          "details": "Support match-only extraction like grep -o",
+          "acceptance_criteria": [
+            "The system implements: Support match-only extraction like grep -o.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-010 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-010 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-011",
+          "title": "Support cancellation like Ctrl+C",
+          "priority": "MUST",
+          "details": "Support cancellation like Ctrl+C",
+          "acceptance_criteria": [
+            "The system implements: Support cancellation like Ctrl+C.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-011 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-011 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "GREP-012",
+          "title": "Support bounded result buffer and export all results",
+          "priority": "MUST",
+          "details": "Support bounded result buffer and export all results",
+          "acceptance_criteria": [
+            "The system implements: Support bounded result buffer and export all results.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "GREP-012 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "GREP-012 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "SearchEngine::start(document_id, query, options) -> SearchTaskId",
+        "SearchEngine::cancel(task_id)",
+        "SearchEngine::subscribe(task_id) -> ResultStream",
+        "SearchEngine::export(task_id, path, format) -> Result<()>"
+      ],
+      "core_data_structures": [
+        "SearchQuery { pattern, mode, case, whole_word, invert, context_before, context_after }",
+        "SearchResult { byte_range, line_ref, preview, captures, context }",
+        "SearchTask { id, progress, cancellation_token, result_sink }"
+      ],
+      "algorithms": [
+        "For literal search use memchr/aho-corasick where possible",
+        "For regex use chunk windows with overlap to handle boundary matches",
+        "Emit small batches to UI thread",
+        "Throttle UI updates to avoid flooding"
+      ],
+      "performance_budget": {
+        "first_result_target_ms": 200,
+        "ui_update_interval_ms": 100,
+        "cancellable": true
+      },
+      "edge_cases": [
+        "Millions of matches",
+        "Invalid regex",
+        "Catastrophic regex prevention",
+        "Match across chunk boundary"
+      ]
+    },
+    {
+      "id": "ENG-006",
+      "name": "Tail Follow Engine",
+      "purpose": "Implements tail -f style live file following for logs and growing files.",
+      "responsibilities": [
+        "Follow appended data",
+        "Pause and resume",
+        "Detect rotation/truncation",
+        "Follow from end or current position",
+        "Combine with filters/search highlights"
+      ],
+      "requirements": [
+        {
+          "id": "TAIL-001",
+          "title": "Open file at end like tail",
+          "priority": "MUST",
+          "details": "Open file at end like tail",
+          "acceptance_criteria": [
+            "The system implements: Open file at end like tail.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-002",
+          "title": "Follow appended lines like tail -f",
+          "priority": "MUST",
+          "details": "Follow appended lines like tail -f",
+          "acceptance_criteria": [
+            "The system implements: Follow appended lines like tail -f.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-003",
+          "title": "Pause follow without closing file",
+          "priority": "MUST",
+          "details": "Pause follow without closing file",
+          "acceptance_criteria": [
+            "The system implements: Pause follow without closing file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-004",
+          "title": "Resume follow",
+          "priority": "MUST",
+          "details": "Resume follow",
+          "acceptance_criteria": [
+            "The system implements: Resume follow.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-005",
+          "title": "Detect truncation",
+          "priority": "MUST",
+          "details": "Detect truncation",
+          "acceptance_criteria": [
+            "The system implements: Detect truncation.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-006",
+          "title": "Detect log rotation",
+          "priority": "MUST",
+          "details": "Detect log rotation",
+          "acceptance_criteria": [
+            "The system implements: Detect log rotation.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-007",
+          "title": "Apply live filters to followed data",
+          "priority": "MUST",
+          "details": "Apply live filters to followed data",
+          "acceptance_criteria": [
+            "The system implements: Apply live filters to followed data.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TAIL-008",
+          "title": "Preserve manual scroll position when user scrolls away from bottom",
+          "priority": "MUST",
+          "details": "Preserve manual scroll position when user scrolls away from bottom",
+          "acceptance_criteria": [
+            "The system implements: Preserve manual scroll position when user scrolls away from bottom.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TAIL-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TAIL-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "TailEngine::start(document_id, options) -> TailTaskId",
+        "TailEngine::pause(task_id)",
+        "TailEngine::resume(task_id)",
+        "TailEngine::stop(task_id)"
+      ],
+      "core_data_structures": [
+        "TailState { last_size, last_inode, follow_position, paused, auto_scroll }",
+        "AppendEvent { byte_range, lines }"
+      ],
+      "algorithms": [
+        "Poll or file-watch for size changes",
+        "Read from previous EOF to new EOF",
+        "If inode changes, treat as rotation",
+        "If size shrinks, treat as truncation"
+      ],
+      "performance_budget": {
+        "append_visibility_target_ms": 250
+      },
+      "edge_cases": [
+        "Rapid log writes",
+        "Log rotation",
+        "Partial line appended",
+        "Network filesystem"
+      ]
+    },
+    {
+      "id": "ENG-007",
+      "name": "Filter, Awk and Pipeline Engine",
+      "purpose": "Provides non-destructive filters and composable Unix-like analysis pipelines.",
+      "responsibilities": [
+        "Live filter",
+        "Invert filter",
+        "Extract fields",
+        "Transform lines",
+        "Group and count",
+        "Sort and unique",
+        "Export output"
+      ],
+      "requirements": [
+        {
+          "id": "PIPE-001",
+          "title": "Filter lines without modifying original file",
+          "priority": "MUST",
+          "details": "Filter lines without modifying original file",
+          "acceptance_criteria": [
+            "The system implements: Filter lines without modifying original file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-002",
+          "title": "Support contains, regex, AND, OR, NOT",
+          "priority": "MUST",
+          "details": "Support contains, regex, AND, OR, NOT",
+          "acceptance_criteria": [
+            "The system implements: Support contains, regex, AND, OR, NOT.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-003",
+          "title": "Support grep -v style inverted filter",
+          "priority": "MUST",
+          "details": "Support grep -v style inverted filter",
+          "acceptance_criteria": [
+            "The system implements: Support grep -v style inverted filter.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-004",
+          "title": "Support awk-like field extraction for delimited text",
+          "priority": "MUST",
+          "details": "Support awk-like field extraction for delimited text",
+          "acceptance_criteria": [
+            "The system implements: Support awk-like field extraction for delimited text.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-005",
+          "title": "Support sort-like streamed or external sort strategy",
+          "priority": "MUST",
+          "details": "Support sort-like streamed or external sort strategy",
+          "acceptance_criteria": [
+            "The system implements: Support sort-like streamed or external sort strategy.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-006",
+          "title": "Support uniq-like duplicate collapse",
+          "priority": "MUST",
+          "details": "Support uniq-like duplicate collapse",
+          "acceptance_criteria": [
+            "The system implements: Support uniq-like duplicate collapse.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-007",
+          "title": "Support wc-like counts",
+          "priority": "MUST",
+          "details": "Support wc-like counts",
+          "acceptance_criteria": [
+            "The system implements: Support wc-like counts.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-008",
+          "title": "Support reusable saved pipelines",
+          "priority": "MUST",
+          "details": "Support reusable saved pipelines",
+          "acceptance_criteria": [
+            "The system implements: Support reusable saved pipelines.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-009",
+          "title": "Support progressive preview after each stage",
+          "priority": "MUST",
+          "details": "Support progressive preview after each stage",
+          "acceptance_criteria": [
+            "The system implements: Support progressive preview after each stage.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-009 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-009 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-010",
+          "title": "Support export pipeline result as text, CSV or JSON",
+          "priority": "MUST",
+          "details": "Support export pipeline result as text, CSV or JSON",
+          "acceptance_criteria": [
+            "The system implements: Support export pipeline result as text, CSV or JSON.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-010 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-010 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-011",
+          "title": "Pipeline execution must be cancellable",
+          "priority": "MUST",
+          "details": "Pipeline execution must be cancellable",
+          "acceptance_criteria": [
+            "The system implements: Pipeline execution must be cancellable.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-011 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-011 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "PIPE-012",
+          "title": "Pipeline must respect memory budget",
+          "priority": "MUST",
+          "details": "Pipeline must respect memory budget",
+          "acceptance_criteria": [
+            "The system implements: Pipeline must respect memory budget.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "PIPE-012 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "PIPE-012 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "PipelineEngine::run(document_id, pipeline_definition) -> PipelineTaskId",
+        "PipelineEngine::preview(task_id, stage_id, limit) -> Preview",
+        "PipelineEngine::cancel(task_id)",
+        "PipelineEngine::export(task_id, output) -> Result<()>"
+      ],
+      "core_data_structures": [
+        "PipelineDefinition { stages }",
+        "Stage { kind, config, input_schema, output_schema }",
+        "PipelineProgress { stage_progress, rows_in, rows_out, bytes_scanned }"
+      ],
+      "algorithms": [
+        "Compile pipeline into streaming execution graph",
+        "Use bounded channels between stages",
+        "Use spill-to-disk for large sort/group operations",
+        "Use approximate algorithms only when user opts in"
+      ],
+      "performance_budget": {
+        "first_preview_target_ms": 500,
+        "default_memory_budget_mb": 128
+      },
+      "edge_cases": [
+        "Huge cardinality group-by",
+        "Sort exceeds memory",
+        "Invalid pipeline",
+        "Stage emits too many rows"
+      ]
+    },
+    {
+      "id": "ENG-008",
+      "name": "Edit Buffer Engine",
+      "purpose": "Provides optimized editable text representation for Edit Mode.",
+      "responsibilities": [
+        "Rope or piece table",
+        "Undo/redo",
+        "Multi-cursor",
+        "Block selection",
+        "Safe replace",
+        "Incremental syntax",
+        "Atomic save"
+      ],
+      "requirements": [
+        {
+          "id": "EDIT-001",
+          "title": "Use rope or piece-table buffer in Edit Mode",
+          "priority": "MUST",
+          "details": "Use rope or piece-table buffer in Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Use rope or piece-table buffer in Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-002",
+          "title": "Support insert, delete, replace",
+          "priority": "MUST",
+          "details": "Support insert, delete, replace",
+          "acceptance_criteria": [
+            "The system implements: Support insert, delete, replace.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-003",
+          "title": "Support undo and redo as transactions",
+          "priority": "MUST",
+          "details": "Support undo and redo as transactions",
+          "acceptance_criteria": [
+            "The system implements: Support undo and redo as transactions.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-004",
+          "title": "Support search and replace",
+          "priority": "MUST",
+          "details": "Support search and replace",
+          "acceptance_criteria": [
+            "The system implements: Support search and replace.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-005",
+          "title": "Support regex replace with captures",
+          "priority": "MUST",
+          "details": "Support regex replace with captures",
+          "acceptance_criteria": [
+            "The system implements: Support regex replace with captures.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-006",
+          "title": "Support block/column selection",
+          "priority": "MUST",
+          "details": "Support block/column selection",
+          "acceptance_criteria": [
+            "The system implements: Support block/column selection.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-007",
+          "title": "Support multi-cursor editing",
+          "priority": "MUST",
+          "details": "Support multi-cursor editing",
+          "acceptance_criteria": [
+            "The system implements: Support multi-cursor editing.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-008",
+          "title": "Support trim, sort, unique and line operations",
+          "priority": "MUST",
+          "details": "Support trim, sort, unique and line operations",
+          "acceptance_criteria": [
+            "The system implements: Support trim, sort, unique and line operations.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-009",
+          "title": "Perform atomic save",
+          "priority": "MUST",
+          "details": "Perform atomic save",
+          "acceptance_criteria": [
+            "The system implements: Perform atomic save.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-009 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-009 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "EDIT-010",
+          "title": "Warn when file is too large for safe Edit Mode",
+          "priority": "MUST",
+          "details": "Warn when file is too large for safe Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Warn when file is too large for safe Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "EDIT-010 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "EDIT-010 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "EditBuffer::insert(position, text) -> EditTransaction",
+        "EditBuffer::delete(range) -> EditTransaction",
+        "EditBuffer::replace(range, text) -> EditTransaction",
+        "EditBuffer::snapshot() -> BufferSnapshot",
+        "UndoManager::undo(buffer_id) -> Result<()>",
+        "UndoManager::redo(buffer_id) -> Result<()>"
+      ],
+      "core_data_structures": [
+        "RopeBuffer or PieceTableBuffer",
+        "EditTransaction { edits, timestamp, merge_policy }",
+        "UndoStack { undo, redo }",
+        "SelectionSet { ranges, carets }"
+      ],
+      "algorithms": [
+        "Use incremental edits",
+        "Merge typing edits into undo groups",
+        "Never split UTF-8 codepoints",
+        "Keep rendering snapshots immutable"
+      ],
+      "performance_budget": {
+        "typing_latency_ms": 8,
+        "edit_operation_target_ms": 8
+      },
+      "edge_cases": [
+        "Very large paste",
+        "Millions of undo entries",
+        "Invalid UTF-8 file",
+        "External file modified while dirty"
+      ]
+    },
+    {
+      "id": "ENG-009",
+      "name": "Replace and Sed-Like Transform Engine",
+      "purpose": "Implements safe find/replace and sed-like line transformations.",
+      "responsibilities": [
+        "Replace current/all",
+        "Regex capture replace",
+        "Preview replace",
+        "Transform selected lines",
+        "Non-destructive preview in View/Analysis Mode"
+      ],
+      "requirements": [
+        {
+          "id": "SED-001",
+          "title": "Support replace in Edit Mode",
+          "priority": "MUST",
+          "details": "Support replace in Edit Mode",
+          "acceptance_criteria": [
+            "The system implements: Support replace in Edit Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-002",
+          "title": "Support regex capture replacement",
+          "priority": "MUST",
+          "details": "Support regex capture replacement",
+          "acceptance_criteria": [
+            "The system implements: Support regex capture replacement.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-003",
+          "title": "Support replace preview before applying",
+          "priority": "MUST",
+          "details": "Support replace preview before applying",
+          "acceptance_criteria": [
+            "The system implements: Support replace preview before applying.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-004",
+          "title": "Support replace all as one undo transaction",
+          "priority": "MUST",
+          "details": "Support replace all as one undo transaction",
+          "acceptance_criteria": [
+            "The system implements: Support replace all as one undo transaction.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-005",
+          "title": "Support non-destructive transform preview in View/Analysis Mode",
+          "priority": "MUST",
+          "details": "Support non-destructive transform preview in View/Analysis Mode",
+          "acceptance_criteria": [
+            "The system implements: Support non-destructive transform preview in View/Analysis Mode.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-006",
+          "title": "Support export transformed output without modifying original",
+          "priority": "MUST",
+          "details": "Support export transformed output without modifying original",
+          "acceptance_criteria": [
+            "The system implements: Support export transformed output without modifying original.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-007",
+          "title": "Support line-based transformations: trim, case, prefix, suffix",
+          "priority": "MUST",
+          "details": "Support line-based transformations: trim, case, prefix, suffix",
+          "acceptance_criteria": [
+            "The system implements: Support line-based transformations: trim, case, prefix, suffix.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "SED-008",
+          "title": "Support safe cancellation for large transforms",
+          "priority": "MUST",
+          "details": "Support safe cancellation for large transforms",
+          "acceptance_criteria": [
+            "The system implements: Support safe cancellation for large transforms.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "SED-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "SED-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "ReplaceEngine::preview(document_id, query, replacement, options) -> PreviewTaskId",
+        "ReplaceEngine::apply_edit(buffer_id, plan) -> EditTransaction",
+        "TransformEngine::export_transformed(document_id, transform, path) -> Result<()>"
+      ],
+      "core_data_structures": [
+        "ReplacePlan { matches, replacement_template, affected_ranges }",
+        "TransformPlan { stages, mode }"
+      ],
+      "algorithms": [
+        "In Edit Mode, generate transaction from match ranges",
+        "In View/Analysis Mode, stream transformed output to export target",
+        "Validate replacement templates before execution"
+      ],
+      "performance_budget": {
+        "preview_first_results_target_ms": 300
+      },
+      "edge_cases": [
+        "Overlapping matches",
+        "Replacement changes later match offsets",
+        "Huge result output",
+        "Invalid capture group"
+      ]
+    },
+    {
+      "id": "ENG-010",
+      "name": "Rendering Engine",
+      "purpose": "Renders visible text, selections, highlights, search matches, bookmarks and diagnostics without full-document layout.",
+      "responsibilities": [
+        "Visible-only rendering",
+        "Syntax span overlay",
+        "Search result overlay",
+        "Selection overlay",
+        "Gutter and line numbers",
+        "Long-line virtualization"
+      ],
+      "requirements": [
+        {
+          "id": "RENDER-001",
+          "title": "Render visible lines only",
+          "priority": "MUST",
+          "details": "Render visible lines only",
+          "acceptance_criteria": [
+            "The system implements: Render visible lines only.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-002",
+          "title": "Use overscan buffer",
+          "priority": "MUST",
+          "details": "Use overscan buffer",
+          "acceptance_criteria": [
+            "The system implements: Use overscan buffer.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-003",
+          "title": "Cache line layouts",
+          "priority": "MUST",
+          "details": "Cache line layouts",
+          "acceptance_criteria": [
+            "The system implements: Cache line layouts.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-004",
+          "title": "Render search highlights from byte ranges",
+          "priority": "MUST",
+          "details": "Render search highlights from byte ranges",
+          "acceptance_criteria": [
+            "The system implements: Render search highlights from byte ranges.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-005",
+          "title": "Render bookmarks and markers",
+          "priority": "MUST",
+          "details": "Render bookmarks and markers",
+          "acceptance_criteria": [
+            "The system implements: Render bookmarks and markers.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-006",
+          "title": "Render selections and block selections",
+          "priority": "MUST",
+          "details": "Render selections and block selections",
+          "acceptance_criteria": [
+            "The system implements: Render selections and block selections.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-007",
+          "title": "Virtualize extremely long lines horizontally",
+          "priority": "MUST",
+          "details": "Virtualize extremely long lines horizontally",
+          "acceptance_criteria": [
+            "The system implements: Virtualize extremely long lines horizontally.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "RENDER-008",
+          "title": "Avoid full-document text measurement",
+          "priority": "MUST",
+          "details": "Avoid full-document text measurement",
+          "acceptance_criteria": [
+            "The system implements: Avoid full-document text measurement.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "RENDER-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "RENDER-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "Renderer::render(snapshot, viewport, overlays) -> Frame",
+        "LayoutCache::get_or_measure(line_ref, style) -> LineLayout",
+        "OverlayEngine::resolve(viewport) -> Vec<OverlaySpan>"
+      ],
+      "core_data_structures": [
+        "Frame { draw_commands }",
+        "LineLayout { glyph_runs, width, height, byte_to_x_map }",
+        "OverlaySpan { byte_range, kind, style }"
+      ],
+      "algorithms": [
+        "Generate draw commands only for viewport",
+        "Reuse glyph and line layout cache",
+        "Dirty-region repaint",
+        "Text measurement lazily per visible line"
+      ],
+      "performance_budget": {
+        "frame_budget_ms": 16,
+        "layout_visible_line_target_ms": 1
+      },
+      "edge_cases": [
+        "Emoji",
+        "Combining characters",
+        "Tabs",
+        "Very long lines",
+        "Mixed fonts"
+      ]
+    },
+    {
+      "id": "ENG-011",
+      "name": "Task Scheduler and Cancellation",
+      "purpose": "Coordinates background scanning, searching, indexing, parsing, filtering and exports.",
+      "responsibilities": [
+        "Priority queues",
+        "Cancellation tokens",
+        "Task progress",
+        "Background throttling",
+        "UI-first scheduling"
+      ],
+      "requirements": [
+        {
+          "id": "TASK-001",
+          "title": "Every long-running task must have cancellation token",
+          "priority": "MUST",
+          "details": "Every long-running task must have cancellation token",
+          "acceptance_criteria": [
+            "The system implements: Every long-running task must have cancellation token.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-002",
+          "title": "UI tasks always outrank background analysis tasks",
+          "priority": "MUST",
+          "details": "UI tasks always outrank background analysis tasks",
+          "acceptance_criteria": [
+            "The system implements: UI tasks always outrank background analysis tasks.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-003",
+          "title": "Search and follow tasks can run concurrently",
+          "priority": "MUST",
+          "details": "Search and follow tasks can run concurrently",
+          "acceptance_criteria": [
+            "The system implements: Search and follow tasks can run concurrently.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-004",
+          "title": "Indexing pauses under memory pressure",
+          "priority": "MUST",
+          "details": "Indexing pauses under memory pressure",
+          "acceptance_criteria": [
+            "The system implements: Indexing pauses under memory pressure.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-005",
+          "title": "Expose background task panel",
+          "priority": "MUST",
+          "details": "Expose background task panel",
+          "acceptance_criteria": [
+            "The system implements: Expose background task panel.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-006",
+          "title": "Allow cancel from UI",
+          "priority": "MUST",
+          "details": "Allow cancel from UI",
+          "acceptance_criteria": [
+            "The system implements: Allow cancel from UI.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-007",
+          "title": "Throttle progress updates",
+          "priority": "MUST",
+          "details": "Throttle progress updates",
+          "acceptance_criteria": [
+            "The system implements: Throttle progress updates.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "TASK-008",
+          "title": "Recover from worker failure",
+          "priority": "MUST",
+          "details": "Recover from worker failure",
+          "acceptance_criteria": [
+            "The system implements: Recover from worker failure.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "TASK-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "TASK-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "TaskScheduler::spawn(kind, priority, job) -> TaskId",
+        "TaskScheduler::cancel(task_id)",
+        "TaskScheduler::progress(task_id) -> TaskProgress",
+        "TaskScheduler::set_priority(task_id, priority)"
+      ],
+      "core_data_structures": [
+        "Task { id, kind, priority, cancellation_token, progress, status }",
+        "TaskQueue { interactive, high, normal, low }"
+      ],
+      "algorithms": [
+        "Use bounded queues",
+        "Use cooperative cancellation checks",
+        "Throttle progress events to UI",
+        "Backpressure when UI cannot consume results"
+      ],
+      "performance_budget": {
+        "cancel_response_target_ms": 100,
+        "progress_update_interval_ms": 100
+      },
+      "edge_cases": [
+        "Task deadlock",
+        "Flood of search results",
+        "Memory pressure",
+        "Worker panic"
+      ]
+    },
+    {
+      "id": "ENG-012",
+      "name": "Diagnostics and Benchmarking",
+      "purpose": "Ensures the editor remains as fast as Unix tools by making performance measurable.",
+      "responsibilities": [
+        "Performance dashboard",
+        "Benchmarks",
+        "Memory diagnostics",
+        "Chunk cache metrics",
+        "Search throughput",
+        "Frame time"
+      ],
+      "requirements": [
+        {
+          "id": "DIAG-001",
+          "title": "Measure perceived open time",
+          "priority": "MUST",
+          "details": "Measure perceived open time",
+          "acceptance_criteria": [
+            "The system implements: Measure perceived open time.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-001 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-001 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-002",
+          "title": "Measure first viewport render time",
+          "priority": "MUST",
+          "details": "Measure first viewport render time",
+          "acceptance_criteria": [
+            "The system implements: Measure first viewport render time.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-002 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-002 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-003",
+          "title": "Measure scroll frame time",
+          "priority": "MUST",
+          "details": "Measure scroll frame time",
+          "acceptance_criteria": [
+            "The system implements: Measure scroll frame time.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-003 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-003 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-004",
+          "title": "Measure search throughput MB/s",
+          "priority": "MUST",
+          "details": "Measure search throughput MB/s",
+          "acceptance_criteria": [
+            "The system implements: Measure search throughput MB/s.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-004 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-004 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-005",
+          "title": "Measure memory per open file",
+          "priority": "MUST",
+          "details": "Measure memory per open file",
+          "acceptance_criteria": [
+            "The system implements: Measure memory per open file.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-005 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-005 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-006",
+          "title": "Measure chunk cache hit rate",
+          "priority": "MUST",
+          "details": "Measure chunk cache hit rate",
+          "acceptance_criteria": [
+            "The system implements: Measure chunk cache hit rate.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-006 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-006 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-007",
+          "title": "Provide benchmark suite for 1GB, 10GB and 20x10GB scenarios",
+          "priority": "MUST",
+          "details": "Provide benchmark suite for 1GB, 10GB and 20x10GB scenarios",
+          "acceptance_criteria": [
+            "The system implements: Provide benchmark suite for 1GB, 10GB and 20x10GB scenarios.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-007 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-007 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        },
+        {
+          "id": "DIAG-008",
+          "title": "Fail CI when performance budget regresses beyond threshold",
+          "priority": "MUST",
+          "details": "Fail CI when performance budget regresses beyond threshold",
+          "acceptance_criteria": [
+            "The system implements: Fail CI when performance budget regresses beyond threshold.",
+            "The UI remains responsive during the operation.",
+            "The implementation avoids full-file loading unless explicitly required and safe."
+          ],
+          "implementation_guidance": [],
+          "tests": [
+            {
+              "name": "DIAG-008 functional test",
+              "type": "functional",
+              "expected": "Works as specified."
+            },
+            {
+              "name": "DIAG-008 large-file test",
+              "type": "performance",
+              "expected": "Works on multi-GB files without UI freeze."
+            }
+          ]
+        }
+      ],
+      "public_interfaces": [
+        "Diagnostics::snapshot() -> DiagnosticsSnapshot",
+        "BenchmarkRunner::run(suite) -> BenchmarkReport"
+      ],
+      "core_data_structures": [
+        "DiagnosticsSnapshot { open_times, frame_times, memory, cache, tasks }",
+        "BenchmarkReport { scenario, metrics, pass_fail }"
+      ],
+      "algorithms": [
+        "Instrument critical paths",
+        "Record timings with low overhead",
+        "Use synthetic large files for repeatable tests"
+      ],
+      "performance_budget": {
+        "diagnostics_overhead_percent_max": 2
+      },
+      "edge_cases": [
+        "Benchmark machine variability",
+        "OS page cache effects",
+        "Thermal throttling"
+      ]
+    }
+  ],
+  "traceability_index": [
+    {
+      "id": "MODE-001",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Only two user-facing modes exist: View/Analysis Mode and Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-002",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Open huge files directly in View/Analysis Mode by default",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-003",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Disable editing commands in View/Analysis Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-004",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Allow copy, search, filter, follow, inspect, bookmark, extract and export in View/Analysis Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-005",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Require explicit confirmation before converting huge file to Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-006",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Show current mode in status bar and title metadata",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-007",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Expose mode capabilities to command registry",
+      "priority": "MUST"
+    },
+    {
+      "id": "MODE-008",
+      "module": "ENG-001",
+      "module_name": "Mode Manager",
+      "title": "Do not allow plugin commands to bypass mode restrictions",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-001",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Opening a file must never require reading the whole file",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-002",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Use memory mapping for View/Analysis Mode when safe",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-003",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Use chunked streaming when mmap is unavailable or unsafe",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-004",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Read only enough bytes to render initial viewport",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-005",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Expose byte-offset based access API",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-006",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Support tail-like reads from end of file",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-007",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Detect file growth for follow mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-008",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Detect truncation and log rotation",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-009",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Perform atomic writes in Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "FILE-010",
+      "module": "ENG-002",
+      "module_name": "Unix-Style File Engine",
+      "title": "Never allocate buffer equal to file size in View/Analysis Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-001",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Do not build full line index during open",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-002",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Build line index lazily for visible and searched regions",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-003",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Support byte offset navigation without full line index",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-004",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Support approximate percentage navigation",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-005",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Support progressive jump-to-line with progress feedback",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-006",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Cache line boundaries for visited chunks",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-007",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Invalidate line index safely when file changes",
+      "priority": "MUST"
+    },
+    {
+      "id": "LINE-008",
+      "module": "ENG-003",
+      "module_name": "Lazy Line Index",
+      "title": "Support mixed line endings with warnings",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-001",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Initial viewport renders without full-file scan",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-002",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Render only visible lines plus overscan",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-003",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Support page down and page up",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-004",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Support jump to start and end of file",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-005",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Support jump to percentage of file",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-006",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Support jump to byte offset",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-007",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Support jump to line with progressive indexing",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-008",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Scrolling must remain smooth while background tasks run",
+      "priority": "MUST"
+    },
+    {
+      "id": "VIEW-009",
+      "module": "ENG-004",
+      "module_name": "Viewport and Pager Engine",
+      "title": "Extremely long lines must be horizontally virtualized",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-001",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Search starts immediately without full indexing",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-002",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Search emits results progressively",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-003",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "First result target under 200ms when match is near current/early region",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-004",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support literal search using fast algorithms",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-005",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support regex search using streaming-safe engine",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-006",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support chunk-boundary matches",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-007",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support before/after context lines like grep -C",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-008",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support invert match like grep -v",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-009",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support count-only mode like grep -c",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-010",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support match-only extraction like grep -o",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-011",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support cancellation like Ctrl+C",
+      "priority": "MUST"
+    },
+    {
+      "id": "GREP-012",
+      "module": "ENG-005",
+      "module_name": "Streaming Search and Grep Engine",
+      "title": "Support bounded result buffer and export all results",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-001",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Open file at end like tail",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-002",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Follow appended lines like tail -f",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-003",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Pause follow without closing file",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-004",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Resume follow",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-005",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Detect truncation",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-006",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Detect log rotation",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-007",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Apply live filters to followed data",
+      "priority": "MUST"
+    },
+    {
+      "id": "TAIL-008",
+      "module": "ENG-006",
+      "module_name": "Tail Follow Engine",
+      "title": "Preserve manual scroll position when user scrolls away from bottom",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-001",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Filter lines without modifying original file",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-002",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support contains, regex, AND, OR, NOT",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-003",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support grep -v style inverted filter",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-004",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support awk-like field extraction for delimited text",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-005",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support sort-like streamed or external sort strategy",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-006",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support uniq-like duplicate collapse",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-007",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support wc-like counts",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-008",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support reusable saved pipelines",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-009",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support progressive preview after each stage",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-010",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Support export pipeline result as text, CSV or JSON",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-011",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Pipeline execution must be cancellable",
+      "priority": "MUST"
+    },
+    {
+      "id": "PIPE-012",
+      "module": "ENG-007",
+      "module_name": "Filter, Awk and Pipeline Engine",
+      "title": "Pipeline must respect memory budget",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-001",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Use rope or piece-table buffer in Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-002",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support insert, delete, replace",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-003",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support undo and redo as transactions",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-004",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support search and replace",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-005",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support regex replace with captures",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-006",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support block/column selection",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-007",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support multi-cursor editing",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-008",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Support trim, sort, unique and line operations",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-009",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Perform atomic save",
+      "priority": "MUST"
+    },
+    {
+      "id": "EDIT-010",
+      "module": "ENG-008",
+      "module_name": "Edit Buffer Engine",
+      "title": "Warn when file is too large for safe Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-001",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support replace in Edit Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-002",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support regex capture replacement",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-003",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support replace preview before applying",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-004",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support replace all as one undo transaction",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-005",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support non-destructive transform preview in View/Analysis Mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-006",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support export transformed output without modifying original",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-007",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support line-based transformations: trim, case, prefix, suffix",
+      "priority": "MUST"
+    },
+    {
+      "id": "SED-008",
+      "module": "ENG-009",
+      "module_name": "Replace and Sed-Like Transform Engine",
+      "title": "Support safe cancellation for large transforms",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-001",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Render visible lines only",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-002",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Use overscan buffer",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-003",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Cache line layouts",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-004",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Render search highlights from byte ranges",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-005",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Render bookmarks and markers",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-006",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Render selections and block selections",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-007",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Virtualize extremely long lines horizontally",
+      "priority": "MUST"
+    },
+    {
+      "id": "RENDER-008",
+      "module": "ENG-010",
+      "module_name": "Rendering Engine",
+      "title": "Avoid full-document text measurement",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-001",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Every long-running task must have cancellation token",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-002",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "UI tasks always outrank background analysis tasks",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-003",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Search and follow tasks can run concurrently",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-004",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Indexing pauses under memory pressure",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-005",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Expose background task panel",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-006",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Allow cancel from UI",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-007",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Throttle progress updates",
+      "priority": "MUST"
+    },
+    {
+      "id": "TASK-008",
+      "module": "ENG-011",
+      "module_name": "Task Scheduler and Cancellation",
+      "title": "Recover from worker failure",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-001",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure perceived open time",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-002",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure first viewport render time",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-003",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure scroll frame time",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-004",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure search throughput MB/s",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-005",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure memory per open file",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-006",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Measure chunk cache hit rate",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-007",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Provide benchmark suite for 1GB, 10GB and 20x10GB scenarios",
+      "priority": "MUST"
+    },
+    {
+      "id": "DIAG-008",
+      "module": "ENG-012",
+      "module_name": "Diagnostics and Benchmarking",
+      "title": "Fail CI when performance budget regresses beyond threshold",
+      "priority": "MUST"
+    }
+  ],
+  "summary": {
+    "module_count": 12,
+    "requirement_count": 109,
+    "mode_count": 2,
+    "unix_commands_modelled": [
+      "less",
+      "more",
+      "tail -f",
+      "grep",
+      "awk",
+      "sed",
+      "sort",
+      "uniq",
+      "wc",
+      "head"
+    ],
+    "primary_goal": "Perceived open time under 200ms for 10GB files via mmap/streaming and first-viewport-only rendering."
+  },
+  "codex_repo_blueprint": {
+    "workspace_layout": {
+      "crates/fastpad_app_macos": "Native macOS shell and menu/window integration",
+      "crates/fastpad_core": "Document manager, mode manager, command registry",
+      "crates/fastpad_file": "mmap, streaming, atomic save, byte-offset reads",
+      "crates/fastpad_line_index": "lazy line indexing and offset mapping",
+      "crates/fastpad_viewport": "less/more style paging and viewport model",
+      "crates/fastpad_render": "visible-only rendering and overlays",
+      "crates/fastpad_search": "grep-like streaming search",
+      "crates/fastpad_tail": "tail -f follow mode",
+      "crates/fastpad_pipeline": "awk/sort/uniq/wc-like pipelines",
+      "crates/fastpad_edit": "rope/piece-table edit buffer",
+      "crates/fastpad_replace": "sed-like replace and transform",
+      "crates/fastpad_tasks": "scheduler, cancellation, progress",
+      "crates/fastpad_diagnostics": "benchmarks and performance telemetry"
+    },
+    "recommended_rust_crates": [
+      "memmap2",
+      "bstr",
+      "memchr",
+      "aho-corasick",
+      "regex-automata",
+      "ropey",
+      "rayon",
+      "tokio",
+      "crossbeam-channel",
+      "notify",
+      "serde",
+      "serde_json",
+      "csv",
+      "chrono",
+      "tracing"
+    ],
+    "absolute_rules_for_codex": [
+      "Do not load a 10GB file into a String.",
+      "Do not build a full line index before first render.",
+      "Do not syntax-highlight the full file before showing it.",
+      "Do not block the UI thread for file scanning, search, indexing or parsing.",
+      "Do not expose edit commands in View/Analysis Mode.",
+      "Do not let plugins bypass mode capabilities.",
+      "Use byte offsets for large-file references.",
+      "Emit progressive results for search/filter/pipelines.",
+      "Every long-running task must support cancellation.",
+      "Benchmark large-file scenarios before declaring success."
+    ]
+  }
+}

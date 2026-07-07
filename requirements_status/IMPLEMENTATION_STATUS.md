@@ -1,0 +1,273 @@
+# FastPad Requirements Implementation Status
+
+Generated: 2026-07-07  
+Repository: `/Users/durgesh/Projects/MacNotepad+`  
+Current baseline commit at generation time: `c8b6de3 Add FastPad app icon`
+
+## Summary
+
+This folder contains copies of all supplied requirement/source documents plus this implementation status report.
+
+Overall product status across the supplied requirements:
+
+| Scope | Approx. Done | Approx. Left | Status |
+|---|---:|---:|---|
+| Full FastPad product from all supplied files | 20% | 80% | MVP foundation only |
+| Native macOS text editor objective | 30% | 70% | Partial |
+| Complete Notepad++-style SRS | 18% | 82% | Partial |
+| Big text analysis requirements | 15% | 85% | Early foundation |
+| Unix-style engineering blueprint | 30% | 70% | Partial foundation |
+
+These percentages are engineering estimates against production-level acceptance, not line-count percentages. The files overlap heavily, so the totals should not be added together.
+
+## Copied Source Documents
+
+| File in this folder | Source | Requirement count / scope | Approx. Done |
+|---|---|---:|---:|
+| `Native_macOS_Text_Editor_Project_Objective.md` | `/Users/durgesh/Downloads/Native_macOS_Text_Editor_Project_Objective.md` | Product vision/objective | 30% |
+| `fastpad_ai_native_complete_srs.json` | `/Users/durgesh/Downloads/fastpad_ai_native_complete_srs.json` | 410 requirements | 18% |
+| `fastpad_ai_native_srs_overview.md` | `/Users/durgesh/Downloads/fastpad_ai_native_srs_overview.md` | 24-module overview | 18% |
+| `fastpad_big_text_analysis_requirements.json` | `/Users/durgesh/Downloads/fastpad_big_text_analysis_requirements.json` | 138 requirements | 15% |
+| `fastpad_big_text_analysis_requirements_overview.md` | `/Users/durgesh/Downloads/fastpad_big_text_analysis_requirements_overview.md` | 14-module overview | 15% |
+| `fastpad_true_engineering_blueprint_unix_style.json` | `/Users/durgesh/Downloads/fastpad_true_engineering_blueprint_unix_style.json` | 109 requirements | 30% |
+| `fastpad_true_engineering_blueprint_unix_style.md` | `/Users/durgesh/Downloads/fastpad_true_engineering_blueprint_unix_style.md` | Unix-style architecture blueprint | 30% |
+
+## Implemented Evidence
+
+Current implemented components:
+
+| Area | Evidence |
+|---|---|
+| Native macOS shell | `crates/fastpad_app_macos` AppKit app, menu bar, `.app` bundle, icon, start script |
+| File open from CLI/Finder | Startup args, `application:openFiles:`, document type metadata |
+| MDI foundation | Shared document store, `TabId`, `ViewId`, `WindowId`, lightweight tabs, per-tab `DocumentViewState` |
+| Document lifecycle foundation | New, open, active document/tab, dirty state, save, save as, save copy |
+| Large-file file access | `fastpad_file` mmap/chunked reads, metadata/sample inspection, bounded reads |
+| View/Analysis mode foundation | Auto mode decision, read-only text view, viewport paging |
+| Lazy line index | `fastpad_line_index::LazyLineIndex` |
+| Viewport engine | `fastpad_viewport::ViewportEngine` |
+| Search core | `fastpad_search` literal/regex chunk scanning with cancellation checks |
+| Edit buffer | `fastpad_edit` rope buffer, undo/redo transactions |
+| Replace core | `fastpad_replace` literal/regex replace and preview |
+| Pipeline foundation | `fastpad_pipeline` contains, regex, invert, extract field, head preview |
+| Tail foundation | `fastpad_tail` offset tracking, pause/resume, truncation detection |
+| Tasks/cancellation | `fastpad_tasks::CancellationToken`, `TaskHandle` |
+| Diagnostics foundation | `fastpad_diagnostics` metrics/budget structs |
+| App icon | `crates/fastpad_app_macos/Assets/AppIcon.png`, `AppIcon.icns` |
+
+Recent verification performed before this report:
+
+- `cargo fmt --all -- --check`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets`
+- `./scripts/smoke_attached_files.sh`
+- `scripts/build_macos_app.sh && codesign --verify --deep --strict --verbose=2 FastPad.app`
+
+## File-by-File Status
+
+### 1. `Native_macOS_Text_Editor_Project_Objective.md`
+
+Approx. done: 30%
+
+Done:
+
+- Native macOS Rust app exists.
+- App is not Electron/browser/cloud based.
+- Two-mode architecture exists: View/Analysis Mode and Edit Mode.
+- Large-file-friendly primitives exist: mmap/chunk reads, lazy line indexing, viewport extraction.
+- Edit Mode has rope buffer, undo/redo, replace core, atomic save.
+- Native app bundle, icon, start script, and smoke tests exist.
+
+Not done:
+
+- Not yet fastest GUI text editor on macOS; no benchmark proof.
+- No custom virtual renderer yet.
+- UI still uses `NSTextView`.
+- Search/filter/tail/statistics panels are not exposed.
+- Multi-cursor, block selection, syntax highlighting, folding, bookmarks, inspectors, and settings are missing.
+- Performance targets are not enforced by benchmarks or CI.
+
+### 2. `fastpad_ai_native_complete_srs.json`
+
+Approx. done: 18%
+
+This file contains 410 requirements: 56 global requirements plus 354 module requirements across 24 modules.
+
+| Module | Approx. Done | Approx. Left | Current status |
+|---|---:|---:|---|
+| MOD-001 Application Shell | 45% | 55% | Launch, window, menus, file open, save flows, quit prompt, app icon, single-window tab strip. Missing multi-window, safe mode, session restore, drag/drop tabs, split UI. |
+| MOD-002 Document Manager | 45% | 55% | Shared documents, tabs/views, dirty state, open/save/save-as/copy. Missing close/reopen lifecycle, external modification prompts, persisted sessions. |
+| MOD-003 File Engine | 45% | 55% | mmap/chunk reads, metadata/sample detection, atomic write. Missing file watch integration, backups, conversions. |
+| MOD-004 Text Buffer | 35% | 65% | Rope buffer and basic edit operations. Missing full editor API, integration breadth, memory policies. |
+| MOD-005 Undo Redo Engine | 30% | 70% | Basic transactions. Missing grouping policy, memory limits, UI command integration. |
+| MOD-006 Cursor Engine | 0% | 100% | No dedicated cursor engine. |
+| MOD-007 Selection Engine | 0% | 100% | No dedicated selection/multi-selection engine. |
+| MOD-008 Rendering Pipeline | 15% | 85% | Render-plan data model only. No custom glyph/layout renderer. |
+| MOD-009 Viewport and Scrolling | 35% | 65% | Viewport extraction and Page Down. Missing smooth scroll/virtual renderer. |
+| MOD-010 Block / Column Selection Engine | 0% | 100% | Not implemented. |
+| MOD-011 Search Engine | 30% | 70% | Core literal/regex search with cancellation checks. Missing live UI/results/workspace search. |
+| MOD-012 Replace Engine | 25% | 75% | Core replace/preview. Missing full UI/workflow and View Mode transform/export. |
+| MOD-013 Syntax Highlighting Engine | 0% | 100% | Not implemented. |
+| MOD-014 Code Folding Engine | 0% | 100% | Not implemented. |
+| MOD-015 Large File Engine | 35% | 65% | Large-file primitives exist. Missing chunk cache policy, background indexing, benchmarks, rich UI. |
+| MOD-016 Workspace Engine | 0% | 100% | Not implemented. |
+| MOD-017 Command System | 25% | 75% | Basic registry/mode gating/menu routing. Missing palette and complete command map. |
+| MOD-018 Settings Engine | 10% | 90% | In-code defaults only. No persisted settings UI. |
+| MOD-019 Theme Engine | 5% | 95% | Native controls only. No editor theme engine. |
+| MOD-020 Plugin Host | 0% | 100% | Not implemented. |
+| MOD-021 Macro Engine | 0% | 100% | Not implemented. |
+| MOD-022 LSP Integration | 0% | 100% | Not implemented. |
+| MOD-023 Git Integration | 0% | 100% | Not implemented. |
+| MOD-024 Testing and Diagnostics | 30% | 70% | Unit tests, smoke tests, metrics structs. Missing benchmark suite/dashboard/CI gates. |
+
+### 3. `fastpad_ai_native_srs_overview.md`
+
+Approx. done: 18%
+
+This overview maps to the same 24-module SRS as `fastpad_ai_native_complete_srs.json`.
+
+Done:
+
+- Initial crate boundaries exist for many core systems.
+- Application shell, document manager, file engine, viewport, search, replace, edit buffer, task cancellation, and diagnostics foundations exist.
+- Native menus show many Notepad++-style categories and placeholders.
+
+Not done:
+
+- Most complete module contracts are not finished.
+- Many UI surfaces are placeholders or not exposed.
+- No plugin/LSP/Git/macro/workspace systems.
+- No custom renderer, syntax highlighting, folding, block selection, or multi-cursor.
+
+### 4. `fastpad_big_text_analysis_requirements.json`
+
+Approx. done: 15%
+
+This file contains 138 requirements across 14 modules.
+
+| Module | Approx. Done | Approx. Left | Current status |
+|---|---:|---:|---|
+| BTA-001 Read-Only Analysis Mode | 35% | 65% | Auto-analysis/read-only foundation. Missing manual toggle, conversion UX, banner, bookmark/export UI. |
+| BTA-002 File Intelligence Panel | 20% | 80% | Metadata/sample intelligence core. Missing visible panel, owner/permissions, detailed estimates. |
+| BTA-003 Streaming Search with Live Results | 25% | 75% | Core streaming search. Missing live UI, progressive result panel, navigation, cancel button. |
+| BTA-004 Live Filter Mode | 20% | 80% | Pipeline/filter core. Missing filtered view UI, saved filters, export. |
+| BTA-005 Text Query Language | 0% | 100% | Not implemented. |
+| BTA-006 Log File Mode | 20% | 80% | Tail-follow primitive. Missing log detection, highlighting, level filters, UI. |
+| BTA-007 Structured Data Modes | 0% | 100% | Not implemented. |
+| BTA-008 Inspectors | 0% | 100% | No line/token/byte/hex inspectors. |
+| BTA-009 Pattern Detection and Data Extraction | 0% | 100% | Not implemented. |
+| BTA-010 Statistics and Frequency Analysis | 0% | 100% | Not implemented. |
+| BTA-011 Bookmarks, Notes, and Timeline | 5% | 95% | View-state bookmark fields exist, no model/UI. |
+| BTA-012 Analysis Pipelines | 20% | 80% | Contains/regex/invert/extract/head preview. Missing builder, saved pipelines, sort/uniq/group/count/export. |
+| BTA-013 Performance and Activity Diagnostics | 15% | 85% | Metrics structs. Missing diagnostics panel/task/memory visualization. |
+| BTA-014 Smart Copy and Export | 5% | 95% | Native text copy through `NSTextView`; no smart copy/export system. |
+
+### 5. `fastpad_big_text_analysis_requirements_overview.md`
+
+Approx. done: 15%
+
+This overview maps to the same Big Text Analysis areas as the JSON file.
+
+Done:
+
+- Read-only analysis foundation.
+- Bounded file reads and viewport extraction.
+- Streaming search core.
+- Basic pipeline/filter core.
+- Tail-follow state.
+- Diagnostics structs.
+
+Not done:
+
+- No analysis panels.
+- No live search/filter UI.
+- No structured data modes.
+- No inspectors, statistics, timeline/bookmark UI, smart export, or performance dashboard.
+
+### 6. `fastpad_true_engineering_blueprint_unix_style.json`
+
+Approx. done: 30%
+
+This file contains 109 requirements across 12 engineering modules.
+
+| Module | Approx. Done | Approx. Left | Current status |
+|---|---:|---:|---|
+| ENG-001 Mode Manager | 45% | 55% | Two modes, auto mode decision, edit gating. Missing explicit conversion flow and huge-edit confirmation UI. |
+| ENG-002 Unix-Style File Engine | 45% | 55% | mmap/chunk reads, byte ranges, tail window, atomic save. Missing robust watch/rotation/fallback policies. |
+| ENG-003 Lazy Line Index | 40% | 60% | Lazy index and visible-region/offset discovery. Missing persistence/progress UI/mixed-ending warnings. |
+| ENG-004 Viewport and Pager Engine | 40% | 60% | Viewport extraction and Page Down. Missing smooth GUI scrolling and long-line virtualization. |
+| ENG-005 Streaming Search and Grep Engine | 35% | 65% | Literal/regex/case/whole-word/bounded results. Missing progressive callbacks/UI, count-only/invert/export features. |
+| ENG-006 Tail Follow Engine | 25% | 75% | Follow offset, pause/resume, truncation detection. Missing rotation detection and UI. |
+| ENG-007 Filter, Awk and Pipeline Engine | 25% | 75% | Contains/regex/invert/extract/head. Missing sort/uniq/wc/group/count/export and visual builder. |
+| ENG-008 Edit Buffer Engine | 35% | 65% | Rope buffer, insert/delete/replace, undo/redo, atomic save. Missing block selection, multi-cursor, line operations. |
+| ENG-009 Replace and Sed-Like Transform Engine | 30% | 70% | Replace all, regex captures, preview, one undo transaction. Missing View Mode transforms/export/cancellation UI. |
+| ENG-010 Rendering Engine | 10% | 90% | RenderPlan model only. Missing actual custom renderer. |
+| ENG-011 Task Scheduler and Cancellation | 25% | 75% | Cancellation token and task handle. Missing priority queues, task panel, throttling integration. |
+| ENG-012 Diagnostics and Benchmarking | 15% | 85% | Metrics/timers only. Missing benchmark suite, memory diagnostics, CI gates. |
+
+### 7. `fastpad_true_engineering_blueprint_unix_style.md`
+
+Approx. done: 30%
+
+Done:
+
+- Core philosophy is represented in the architecture: bounded file reads, lazy line index, byte-offset anchors, viewport-first rendering, streaming search/pipelines, cancellation primitives.
+- The implementation is split into small Rust crates.
+- Large files use View/Analysis mode by default based on size/risk.
+
+Not done:
+
+- UI thread still has synchronous open/render paths in places.
+- Expensive operations are not all integrated as background UI tasks.
+- No benchmark proof for startup/open/search/memory budgets.
+- No true custom viewport renderer.
+- No complete follow/filter/pipeline/statistics UI.
+
+## Notepad++-Style Menu Catalog Status
+
+The SRS contains 8 Notepad++ feature catalog sections and 85 supported languages.
+
+Done:
+
+- Native menu bar exists.
+- File/Edit/Search/View/Encoding/Language/Settings/Tools sections exist.
+- Macro/Run/Plugins/Tab menus are visible.
+- Language list is visible as disabled placeholders.
+- Core commands wired: New, Open, Save, Save As, Save Copy As, Exit, Page Down, native find actions, next/previous tab, duplicate tab, pin/unpin tab.
+
+Not done:
+
+- Most visible Notepad++ menu commands are placeholders.
+- No full preferences/style configurator/shortcut mapper.
+- No plugin admin, macro engine, run command engine, compare/XML/JSON tools.
+- No full session load/save UI.
+
+## Highest-Risk Missing Work
+
+The following items block calling the application production-ready:
+
+1. Custom virtual renderer for huge files instead of `NSTextView`.
+2. Full async task integration so open/search/filter/indexing never block the UI.
+3. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
+4. Search/filter/tail UI with progressive results and cancellation controls.
+5. Close/reopen/recently closed tab lifecycle.
+6. Session restore: tabs, active tab, cursor/scroll, filters, search history, splits, bookmarks, zoom.
+7. File watching: external modification, deletion, truncation, log rotation.
+8. Dedicated cursor and selection engines.
+9. Block/column selection and multi-cursor editing.
+10. Syntax highlighting and code folding.
+11. Settings/theme/shortcut persistence and UI.
+12. Workspace/project search and folder panels.
+13. Plugin host, macro engine, LSP integration, and Git integration.
+
+## Current Product Classification
+
+Current state:
+
+**MVP architecture prototype / foundation**
+
+Not current state:
+
+**Finished Notepad++-class editor**
+
+The app can build, launch, open files, show a native UI, show menus, use a shared tab/document model, perform basic edit/save flows, and pass smoke tests against the supplied documents. Most advanced editor features, analysis UI, performance proof, and production polish remain to be implemented.

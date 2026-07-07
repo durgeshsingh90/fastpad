@@ -1,0 +1,4742 @@
+{
+  "document_type": "CODEX_READY_BIG_TEXT_ANALYSIS_REQUIREMENTS",
+  "metadata": {
+    "product_name": "FastPad",
+    "description": "Additional requirements for big text file analysis features in a native macOS Notepad++-style Rust editor.",
+    "created_date": "2026-07-07",
+    "version": "1.0.0",
+    "intended_reader": [
+      "Codex",
+      "Rust engineer",
+      "Product architect"
+    ],
+    "relationship_to_main_srs": "This is an add-on specification to the main FastPad SRS. It focuses on huge file viewing, read-only analysis mode, logs, filters, queries, pipelines, and text intelligence."
+  },
+  "design_principles": [
+    "Analysis must work without loading the whole file into RAM.",
+    "Read-only analysis must be the default for huge files.",
+    "Search, filter, stats, extraction, and pipelines must be streaming where possible.",
+    "All long-running tasks must be cancellable.",
+    "Original files must not be modified by analysis features.",
+    "UI must remain responsive while analysis runs.",
+    "Results should appear progressively, not only after full completion.",
+    "Features should feel like GUI versions of Unix tools: grep, awk, sort, uniq, wc, tail, less."
+  ],
+  "default_thresholds": {
+    "large_file_mode_mb": 512,
+    "huge_file_warning_mb": 100,
+    "max_default_search_results": 100000,
+    "max_default_block_carets": 10000,
+    "default_chunk_size_kb": 1024,
+    "diagnostics_refresh_interval_ms": 500
+  },
+  "modules": [
+    {
+      "id": "BTA-001",
+      "name": "Read-Only Analysis Mode",
+      "purpose": "A maximum-performance mode for inspecting very large files without enabling expensive editing features.",
+      "requirements": [
+        {
+          "id": "BTA-001-001",
+          "title": "Automatically enable Read-Only Analysis Mode for huge files",
+          "priority": "MUST",
+          "description": "When a file exceeds configured size threshold, open it in read-only analysis mode by default.",
+          "acceptance_criteria": [
+            "Files above threshold open without loading entire content into RAM.",
+            "Editing commands are disabled or hidden.",
+            "Status bar clearly shows Read-Only Analysis Mode.",
+            "User can explicitly override mode only when safe."
+          ],
+          "implementation_notes": [
+            "Default threshold: 512 MB.",
+            "Use mmap or chunked streaming.",
+            "Disable full syntax highlighting, minimap, full indexing, and full line counting by default."
+          ],
+          "test_cases": [
+            {
+              "name": "BTA-001-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-002",
+          "title": "Manual toggle for Read-Only Analysis Mode",
+          "priority": "SHOULD",
+          "description": "Manual toggle for Read-Only Analysis Mode",
+          "acceptance_criteria": [
+            "User can use: Manual toggle for Read-Only Analysis Mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-003",
+          "title": "Disable destructive editing commands in analysis mode",
+          "priority": "MUST",
+          "description": "Disable destructive editing commands in analysis mode",
+          "acceptance_criteria": [
+            "User can use: Disable destructive editing commands in analysis mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-004",
+          "title": "Allow copy, search, filter, bookmark, and export in analysis mode",
+          "priority": "MUST",
+          "description": "Allow copy, search, filter, bookmark, and export in analysis mode",
+          "acceptance_criteria": [
+            "User can use: Allow copy, search, filter, bookmark, and export in analysis mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-005",
+          "title": "Show active optimizations in mode banner",
+          "priority": "SHOULD",
+          "description": "Show active optimizations in mode banner",
+          "acceptance_criteria": [
+            "User can use: Show active optimizations in mode banner.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-006",
+          "title": "Allow safe conversion from analysis mode to editable mode",
+          "priority": "SHOULD",
+          "description": "Allow safe conversion from analysis mode to editable mode",
+          "acceptance_criteria": [
+            "User can use: Allow safe conversion from analysis mode to editable mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-001-007",
+          "title": "Warn before converting huge file to editable mode",
+          "priority": "MUST",
+          "description": "Warn before converting huge file to editable mode",
+          "acceptance_criteria": [
+            "User can use: Warn before converting huge file to editable mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-001-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-001-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "AnalysisMode::activate(document_id, reason) -> Result<()>",
+        "AnalysisMode::deactivate(document_id) -> Result<()>",
+        "AnalysisMode::capabilities(document_id) -> CapabilitySet"
+      ],
+      "data_structures": [
+        "AnalysisModeState { enabled, reason, disabled_features, enabled_features, thresholds }",
+        "CapabilitySet { can_edit, can_search, can_filter, can_bookmark, can_export }"
+      ],
+      "performance_budget": {
+        "initial_view_target_ms": 1000,
+        "max_ram_for_1gb_file_mb": 64,
+        "typing_latency_requirement": "not applicable because editing disabled"
+      },
+      "edge_cases": [
+        "File grows while open",
+        "File is deleted while open",
+        "User attempts paste/edit",
+        "User opens binary file",
+        "File is on slow network disk"
+      ]
+    },
+    {
+      "id": "BTA-002",
+      "name": "File Intelligence Panel",
+      "purpose": "Immediately summarizes file metadata, structure, statistics, encoding, and risk indicators.",
+      "requirements": [
+        {
+          "id": "BTA-002-001",
+          "title": "Show file name, path, size, modified time, owner, and permissions",
+          "priority": "MUST",
+          "description": "Show file name, path, size, modified time, owner, and permissions",
+          "acceptance_criteria": [
+            "User can use: Show file name, path, size, modified time, owner, and permissions.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-002",
+          "title": "Show detected encoding and BOM status",
+          "priority": "MUST",
+          "description": "Show detected encoding and BOM status",
+          "acceptance_criteria": [
+            "User can use: Show detected encoding and BOM status.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-003",
+          "title": "Show detected line ending type",
+          "priority": "MUST",
+          "description": "Show detected line ending type",
+          "acceptance_criteria": [
+            "User can use: Show detected line ending type.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-004",
+          "title": "Estimate total line count lazily for huge files",
+          "priority": "MUST",
+          "description": "Estimate total line count lazily for huge files",
+          "acceptance_criteria": [
+            "User can use: Estimate total line count lazily for huge files.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-005",
+          "title": "Show longest line and average line length",
+          "priority": "SHOULD",
+          "description": "Show longest line and average line length",
+          "acceptance_criteria": [
+            "User can use: Show longest line and average line length.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-006",
+          "title": "Detect binary/text confidence score",
+          "priority": "MUST",
+          "description": "Detect binary/text confidence score",
+          "acceptance_criteria": [
+            "User can use: Detect binary/text confidence score.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-007",
+          "title": "Detect likely file type: log, CSV, JSON, XML, SQL, source, markdown, binary",
+          "priority": "SHOULD",
+          "description": "Detect likely file type: log, CSV, JSON, XML, SQL, source, markdown, binary",
+          "acceptance_criteria": [
+            "User can use: Detect likely file type: log, CSV, JSON, XML, SQL, source, markdown, binary.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-008",
+          "title": "Show warning for very long lines",
+          "priority": "MUST",
+          "description": "Show warning for very long lines",
+          "acceptance_criteria": [
+            "User can use: Show warning for very long lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-002-009",
+          "title": "Show statistics progress when still scanning",
+          "priority": "MUST",
+          "description": "Show statistics progress when still scanning",
+          "acceptance_criteria": [
+            "User can use: Show statistics progress when still scanning.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-002-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-002-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "FileIntelligence::scan(document_id, options) -> TaskId",
+        "FileIntelligence::snapshot(document_id) -> FileIntelligenceSnapshot"
+      ],
+      "data_structures": [
+        "FileIntelligenceSnapshot { metadata, encoding, line_endings, estimated_lines, longest_line, average_line_length, detected_structure }"
+      ],
+      "performance_budget": {
+        "initial_metadata_target_ms": 100,
+        "background_scan_must_be_cancellable": true
+      },
+      "edge_cases": [
+        "Mixed line endings",
+        "Invalid UTF-8",
+        "One-line 2GB JSON",
+        "File changes during scan"
+      ]
+    },
+    {
+      "id": "BTA-003",
+      "name": "Streaming Search with Live Results",
+      "purpose": "Search starts immediately and streams results while scanning continues.",
+      "requirements": [
+        {
+          "id": "BTA-003-001",
+          "title": "Start search before full file is indexed",
+          "priority": "MUST",
+          "description": "Start search before full file is indexed",
+          "acceptance_criteria": [
+            "User can use: Start search before full file is indexed.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-002",
+          "title": "Show live result count while searching",
+          "priority": "MUST",
+          "description": "Show live result count while searching",
+          "acceptance_criteria": [
+            "User can use: Show live result count while searching.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-003",
+          "title": "Allow navigation to results before search completes",
+          "priority": "MUST",
+          "description": "Allow navigation to results before search completes",
+          "acceptance_criteria": [
+            "User can use: Allow navigation to results before search completes.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-004",
+          "title": "Support literal search",
+          "priority": "MUST",
+          "description": "Support literal search",
+          "acceptance_criteria": [
+            "User can use: Support literal search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-005",
+          "title": "Support regex search",
+          "priority": "MUST",
+          "description": "Support regex search",
+          "acceptance_criteria": [
+            "User can use: Support regex search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-006",
+          "title": "Support case-sensitive and case-insensitive search",
+          "priority": "MUST",
+          "description": "Support case-sensitive and case-insensitive search",
+          "acceptance_criteria": [
+            "User can use: Support case-sensitive and case-insensitive search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-007",
+          "title": "Support whole-word search",
+          "priority": "MUST",
+          "description": "Support whole-word search",
+          "acceptance_criteria": [
+            "User can use: Support whole-word search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-008",
+          "title": "Support search cancellation",
+          "priority": "MUST",
+          "description": "Support search cancellation",
+          "acceptance_criteria": [
+            "User can use: Support search cancellation.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-009",
+          "title": "Support result limit with continue option",
+          "priority": "MUST",
+          "description": "Support result limit with continue option",
+          "acceptance_criteria": [
+            "User can use: Support result limit with continue option.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-010",
+          "title": "Show match context lines",
+          "priority": "SHOULD",
+          "description": "Show match context lines",
+          "acceptance_criteria": [
+            "User can use: Show match context lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-011",
+          "title": "Export search results",
+          "priority": "SHOULD",
+          "description": "Export search results",
+          "acceptance_criteria": [
+            "User can use: Export search results.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-011 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-011 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-003-012",
+          "title": "Keep multiple search result tabs",
+          "priority": "SHOULD",
+          "description": "Keep multiple search result tabs",
+          "acceptance_criteria": [
+            "User can use: Keep multiple search result tabs.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-003-012 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-003-012 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "StreamingSearch::start(document_id, query, options) -> SearchTaskId",
+        "StreamingSearch::next_results(task_id, limit) -> Vec<SearchResult>",
+        "StreamingSearch::cancel(task_id)",
+        "StreamingSearch::progress(task_id) -> SearchProgress"
+      ],
+      "data_structures": [
+        "SearchResult { line_number_optional, byte_offset, match_start, match_end, preview, context_before, context_after }",
+        "SearchProgress { scanned_bytes, total_bytes, results_found, status }"
+      ],
+      "performance_budget": {
+        "first_result_target_ms": 200,
+        "ui_update_interval_ms": 100,
+        "search_must_not_block_scroll": true
+      },
+      "edge_cases": [
+        "Regex match crosses chunk boundary",
+        "Invalid regex",
+        "Millions of results",
+        "File changes during search",
+        "Search in compressed or binary file"
+      ]
+    },
+    {
+      "id": "BTA-004",
+      "name": "Live Filter Mode",
+      "purpose": "A non-destructive filtered view that shows matching lines without modifying the file.",
+      "requirements": [
+        {
+          "id": "BTA-004-001",
+          "title": "Show only lines containing text",
+          "priority": "MUST",
+          "description": "Show only lines containing text",
+          "acceptance_criteria": [
+            "User can use: Show only lines containing text.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-002",
+          "title": "Show only lines matching regex",
+          "priority": "MUST",
+          "description": "Show only lines matching regex",
+          "acceptance_criteria": [
+            "User can use: Show only lines matching regex.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-003",
+          "title": "Hide matching lines",
+          "priority": "SHOULD",
+          "description": "Hide matching lines",
+          "acceptance_criteria": [
+            "User can use: Hide matching lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-004",
+          "title": "Combine multiple filters with AND/OR/NOT",
+          "priority": "SHOULD",
+          "description": "Combine multiple filters with AND/OR/NOT",
+          "acceptance_criteria": [
+            "User can use: Combine multiple filters with AND/OR/NOT.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-005",
+          "title": "Keep original file untouched",
+          "priority": "MUST",
+          "description": "Keep original file untouched",
+          "acceptance_criteria": [
+            "User can use: Keep original file untouched.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-006",
+          "title": "Show hidden line count",
+          "priority": "MUST",
+          "description": "Show hidden line count",
+          "acceptance_criteria": [
+            "User can use: Show hidden line count.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-007",
+          "title": "Allow export of filtered view",
+          "priority": "SHOULD",
+          "description": "Allow export of filtered view",
+          "acceptance_criteria": [
+            "User can use: Allow export of filtered view.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-008",
+          "title": "Allow filters to be saved and reused",
+          "priority": "SHOULD",
+          "description": "Allow filters to be saved and reused",
+          "acceptance_criteria": [
+            "User can use: Allow filters to be saved and reused.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-004-009",
+          "title": "Allow filter preview before applying",
+          "priority": "SHOULD",
+          "description": "Allow filter preview before applying",
+          "acceptance_criteria": [
+            "User can use: Allow filter preview before applying.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-004-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-004-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "FilterEngine::apply(document_id, filter_expr) -> FilterViewId",
+        "FilterEngine::clear(filter_view_id)",
+        "FilterEngine::export(filter_view_id, path) -> Result<()>"
+      ],
+      "data_structures": [
+        "FilterExpression { clauses, operator, case_sensitivity }",
+        "FilterView { source_document, visible_line_refs, hidden_count, materialization_policy }"
+      ],
+      "performance_budget": {
+        "first_visible_results_target_ms": 300,
+        "large_filter_must_stream": true
+      },
+      "edge_cases": [
+        "Filter returns zero lines",
+        "Filter returns all lines",
+        "File changes while filter active",
+        "Filter expression is invalid"
+      ]
+    },
+    {
+      "id": "BTA-005",
+      "name": "Text Query Language",
+      "purpose": "A simple SQL-like/Unix-like query syntax for non-programmers to inspect text files.",
+      "requirements": [
+        {
+          "id": "BTA-005-001",
+          "title": "Support contains('text') query",
+          "priority": "MUST",
+          "description": "Support contains('text') query",
+          "acceptance_criteria": [
+            "User can use: Support contains('text') query.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-002",
+          "title": "Support regex('pattern') query",
+          "priority": "MUST",
+          "description": "Support regex('pattern') query",
+          "acceptance_criteria": [
+            "User can use: Support regex('pattern') query.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-003",
+          "title": "Support AND, OR, NOT",
+          "priority": "MUST",
+          "description": "Support AND, OR, NOT",
+          "acceptance_criteria": [
+            "User can use: Support AND, OR, NOT.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-004",
+          "title": "Support field comparisons for structured logs",
+          "priority": "SHOULD",
+          "description": "Support field comparisons for structured logs",
+          "acceptance_criteria": [
+            "User can use: Support field comparisons for structured logs.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-005",
+          "title": "Support timestamp comparisons when timestamps detected",
+          "priority": "SHOULD",
+          "description": "Support timestamp comparisons when timestamps detected",
+          "acceptance_criteria": [
+            "User can use: Support timestamp comparisons when timestamps detected.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-006",
+          "title": "Support saved queries",
+          "priority": "SHOULD",
+          "description": "Support saved queries",
+          "acceptance_criteria": [
+            "User can use: Support saved queries.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-007",
+          "title": "Show query parse errors clearly",
+          "priority": "MUST",
+          "description": "Show query parse errors clearly",
+          "acceptance_criteria": [
+            "User can use: Show query parse errors clearly.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-005-008",
+          "title": "Compile query into streaming execution plan",
+          "priority": "MUST",
+          "description": "Compile query into streaming execution plan",
+          "acceptance_criteria": [
+            "User can use: Compile query into streaming execution plan.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-005-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-005-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "TextQuery::parse(source) -> Result<QueryAst>",
+        "TextQuery::compile(ast, schema_hint) -> QueryPlan",
+        "TextQuery::execute_streaming(document_id, plan) -> TaskId"
+      ],
+      "data_structures": [
+        "QueryAst",
+        "QueryPlan",
+        "QueryDiagnostic { span, message, suggestion }"
+      ],
+      "performance_budget": {
+        "parse_target_ms": 10,
+        "execution_must_stream": true
+      },
+      "edge_cases": [
+        "Malformed query",
+        "Unknown field",
+        "Timestamp format not detected",
+        "Regex too expensive"
+      ]
+    },
+    {
+      "id": "BTA-006",
+      "name": "Log File Mode",
+      "purpose": "Specialized mode for server/application/payment logs.",
+      "requirements": [
+        {
+          "id": "BTA-006-001",
+          "title": "Auto-detect log files",
+          "priority": "SHOULD",
+          "description": "Auto-detect log files",
+          "acceptance_criteria": [
+            "User can use: Auto-detect log files.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-002",
+          "title": "Highlight ERROR, WARN, INFO, DEBUG, TRACE levels",
+          "priority": "MUST",
+          "description": "Highlight ERROR, WARN, INFO, DEBUG, TRACE levels",
+          "acceptance_criteria": [
+            "User can use: Highlight ERROR, WARN, INFO, DEBUG, TRACE levels.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-003",
+          "title": "Filter by log level",
+          "priority": "MUST",
+          "description": "Filter by log level",
+          "acceptance_criteria": [
+            "User can use: Filter by log level.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-004",
+          "title": "Jump to next/previous error",
+          "priority": "MUST",
+          "description": "Jump to next/previous error",
+          "acceptance_criteria": [
+            "User can use: Jump to next/previous error.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-005",
+          "title": "Bookmark all errors",
+          "priority": "SHOULD",
+          "description": "Bookmark all errors",
+          "acceptance_criteria": [
+            "User can use: Bookmark all errors.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-006",
+          "title": "Parse timestamps from common formats",
+          "priority": "SHOULD",
+          "description": "Parse timestamps from common formats",
+          "acceptance_criteria": [
+            "User can use: Parse timestamps from common formats.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-007",
+          "title": "Timeline view by timestamp",
+          "priority": "SHOULD",
+          "description": "Timeline view by timestamp",
+          "acceptance_criteria": [
+            "User can use: Timeline view by timestamp.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-008",
+          "title": "Collapse repeated messages",
+          "priority": "SHOULD",
+          "description": "Collapse repeated messages",
+          "acceptance_criteria": [
+            "User can use: Collapse repeated messages.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-009",
+          "title": "Tail/follow file mode",
+          "priority": "MUST",
+          "description": "Tail/follow file mode",
+          "acceptance_criteria": [
+            "User can use: Tail/follow file mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-006-010",
+          "title": "Pause follow mode without closing file",
+          "priority": "MUST",
+          "description": "Pause follow mode without closing file",
+          "acceptance_criteria": [
+            "User can use: Pause follow mode without closing file.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-006-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-006-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "LogMode::detect(document_id) -> Confidence",
+        "LogMode::parse_line(line) -> Option<LogRecord>",
+        "LogMode::follow(document_id) -> FollowTaskId"
+      ],
+      "data_structures": [
+        "LogRecord { timestamp, level, source, message, fields }",
+        "LogTimelineBucket { start, end, count_by_level }"
+      ],
+      "performance_budget": {
+        "tail_latency_target_ms": 250,
+        "log_level_highlight_must_be_line_local": true
+      },
+      "edge_cases": [
+        "Multiline stack traces",
+        "Mixed timestamp formats",
+        "Log rotation",
+        "File truncation",
+        "Huge single log line"
+      ]
+    },
+    {
+      "id": "BTA-007",
+      "name": "Structured Data Modes",
+      "purpose": "Special modes for CSV, JSON, XML, SQL, and line-delimited JSON.",
+      "requirements": [
+        {
+          "id": "BTA-007-001",
+          "title": "CSV table view for large CSV files",
+          "priority": "SHOULD",
+          "description": "CSV table view for large CSV files",
+          "acceptance_criteria": [
+            "User can use: CSV table view for large CSV files.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-002",
+          "title": "CSV column resizing",
+          "priority": "SHOULD",
+          "description": "CSV column resizing",
+          "acceptance_criteria": [
+            "User can use: CSV column resizing.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-003",
+          "title": "CSV column filter",
+          "priority": "SHOULD",
+          "description": "CSV column filter",
+          "acceptance_criteria": [
+            "User can use: CSV column filter.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-004",
+          "title": "CSV column sort using streaming/indexed mode",
+          "priority": "COULD",
+          "description": "CSV column sort using streaming/indexed mode",
+          "acceptance_criteria": [
+            "User can use: CSV column sort using streaming/indexed mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-005",
+          "title": "JSON tree viewer",
+          "priority": "SHOULD",
+          "description": "JSON tree viewer",
+          "acceptance_criteria": [
+            "User can use: JSON tree viewer.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-006",
+          "title": "JSON pretty print",
+          "priority": "SHOULD",
+          "description": "JSON pretty print",
+          "acceptance_criteria": [
+            "User can use: JSON pretty print.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-007",
+          "title": "JSON minify",
+          "priority": "SHOULD",
+          "description": "JSON minify",
+          "acceptance_criteria": [
+            "User can use: JSON minify.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-008",
+          "title": "JSON path search",
+          "priority": "SHOULD",
+          "description": "JSON path search",
+          "acceptance_criteria": [
+            "User can use: JSON path search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-009",
+          "title": "XML tree viewer",
+          "priority": "SHOULD",
+          "description": "XML tree viewer",
+          "acceptance_criteria": [
+            "User can use: XML tree viewer.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-010",
+          "title": "XPath search",
+          "priority": "SHOULD",
+          "description": "XPath search",
+          "acceptance_criteria": [
+            "User can use: XPath search.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-011",
+          "title": "SQL statement splitter",
+          "priority": "SHOULD",
+          "description": "SQL statement splitter",
+          "acceptance_criteria": [
+            "User can use: SQL statement splitter.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-011 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-011 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-007-012",
+          "title": "Line-delimited JSON record mode",
+          "priority": "SHOULD",
+          "description": "Line-delimited JSON record mode",
+          "acceptance_criteria": [
+            "User can use: Line-delimited JSON record mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-007-012 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-007-012 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "StructureDetector::detect(document_id) -> StructureHint",
+        "StructuredView::open(document_id, structure_hint) -> StructuredViewId"
+      ],
+      "data_structures": [
+        "StructureHint { kind, confidence, schema_sample }",
+        "CsvSchema { columns, delimiter, quote_char }",
+        "JsonNodeRef { byte_range, path, collapsed }"
+      ],
+      "performance_budget": {
+        "large_structured_files_must_parse_incrementally": true
+      },
+      "edge_cases": [
+        "Malformed CSV quotes",
+        "Huge JSON object on one line",
+        "Malformed XML",
+        "SQL delimiter inside string"
+      ]
+    },
+    {
+      "id": "BTA-008",
+      "name": "Inspectors",
+      "purpose": "Panels that inspect a line, token, byte offset, pattern, or selected region.",
+      "requirements": [
+        {
+          "id": "BTA-008-001",
+          "title": "Line inspector",
+          "priority": "MUST",
+          "description": "Line inspector",
+          "acceptance_criteria": [
+            "User can use: Line inspector.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-002",
+          "title": "Token inspector",
+          "priority": "SHOULD",
+          "description": "Token inspector",
+          "acceptance_criteria": [
+            "User can use: Token inspector.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-003",
+          "title": "Byte offset inspector",
+          "priority": "MUST",
+          "description": "Byte offset inspector",
+          "acceptance_criteria": [
+            "User can use: Byte offset inspector.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-004",
+          "title": "Hex view for selected bytes",
+          "priority": "SHOULD",
+          "description": "Hex view for selected bytes",
+          "acceptance_criteria": [
+            "User can use: Hex view for selected bytes.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-005",
+          "title": "Show line length, byte offset, hash, whitespace, and Unicode details",
+          "priority": "MUST",
+          "description": "Show line length, byte offset, hash, whitespace, and Unicode details",
+          "acceptance_criteria": [
+            "User can use: Show line length, byte offset, hash, whitespace, and Unicode details.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-006",
+          "title": "Show token occurrence count",
+          "priority": "SHOULD",
+          "description": "Show token occurrence count",
+          "acceptance_criteria": [
+            "User can use: Show token occurrence count.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-007",
+          "title": "Show first/last occurrence for selected token",
+          "priority": "SHOULD",
+          "description": "Show first/last occurrence for selected token",
+          "acceptance_criteria": [
+            "User can use: Show first/last occurrence for selected token.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-008-008",
+          "title": "Show surrounding context",
+          "priority": "SHOULD",
+          "description": "Show surrounding context",
+          "acceptance_criteria": [
+            "User can use: Show surrounding context.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-008-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-008-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "Inspector::inspect_line(document_id, line_ref) -> LineInspection",
+        "Inspector::inspect_token(document_id, token) -> TokenInspection",
+        "Inspector::inspect_offset(document_id, byte_offset) -> ByteInspection"
+      ],
+      "data_structures": [
+        "LineInspection { line_number, byte_start, byte_end, char_count, byte_count, hash, whitespace_summary }",
+        "TokenInspection { token, frequency, first_seen, last_seen, nearby_terms }"
+      ],
+      "performance_budget": {
+        "line_inspection_target_ms": 20,
+        "token_frequency_may_be_background": true
+      },
+      "edge_cases": [
+        "Invalid UTF-8",
+        "Offset in middle of multibyte character",
+        "Very long selected token",
+        "Token appears millions of times"
+      ]
+    },
+    {
+      "id": "BTA-009",
+      "name": "Pattern Detection and Data Extraction",
+      "purpose": "Detect and extract useful entities from text files.",
+      "requirements": [
+        {
+          "id": "BTA-009-001",
+          "title": "Detect emails",
+          "priority": "SHOULD",
+          "description": "Detect emails",
+          "acceptance_criteria": [
+            "User can use: Detect emails.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-002",
+          "title": "Detect URLs",
+          "priority": "SHOULD",
+          "description": "Detect URLs",
+          "acceptance_criteria": [
+            "User can use: Detect URLs.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-003",
+          "title": "Detect IPv4 and IPv6 addresses",
+          "priority": "SHOULD",
+          "description": "Detect IPv4 and IPv6 addresses",
+          "acceptance_criteria": [
+            "User can use: Detect IPv4 and IPv6 addresses.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-004",
+          "title": "Detect UUIDs",
+          "priority": "SHOULD",
+          "description": "Detect UUIDs",
+          "acceptance_criteria": [
+            "User can use: Detect UUIDs.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-005",
+          "title": "Detect JWT-like tokens",
+          "priority": "SHOULD",
+          "description": "Detect JWT-like tokens",
+          "acceptance_criteria": [
+            "User can use: Detect JWT-like tokens.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-006",
+          "title": "Detect Base64-like strings",
+          "priority": "SHOULD",
+          "description": "Detect Base64-like strings",
+          "acceptance_criteria": [
+            "User can use: Detect Base64-like strings.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-007",
+          "title": "Detect hex strings",
+          "priority": "SHOULD",
+          "description": "Detect hex strings",
+          "acceptance_criteria": [
+            "User can use: Detect hex strings.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-008",
+          "title": "Detect ISO dates and timestamps",
+          "priority": "SHOULD",
+          "description": "Detect ISO dates and timestamps",
+          "acceptance_criteria": [
+            "User can use: Detect ISO dates and timestamps.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-009",
+          "title": "Extract detected entities to CSV",
+          "priority": "SHOULD",
+          "description": "Extract detected entities to CSV",
+          "acceptance_criteria": [
+            "User can use: Extract detected entities to CSV.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-010",
+          "title": "Allow custom extraction regex",
+          "priority": "MUST",
+          "description": "Allow custom extraction regex",
+          "acceptance_criteria": [
+            "User can use: Allow custom extraction regex.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-009-011",
+          "title": "Mask sensitive values in preview when configured",
+          "priority": "MUST",
+          "description": "Mask sensitive values in preview when configured",
+          "acceptance_criteria": [
+            "User can use: Mask sensitive values in preview when configured.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-009-011 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-009-011 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "PatternDetector::scan(document_id, pattern_set) -> TaskId",
+        "Extractor::extract(document_id, extraction_plan) -> ExtractResult"
+      ],
+      "data_structures": [
+        "PatternMatch { kind, byte_range, line_ref, value_preview, confidence }",
+        "ExtractionPlan { patterns, output_format, dedupe_policy, masking_policy }"
+      ],
+      "performance_budget": {
+        "must_stream_for_large_files": true,
+        "result_limit_default": 100000
+      },
+      "edge_cases": [
+        "False positives",
+        "Sensitive data in logs",
+        "Very high match count",
+        "Regex catastrophic backtracking prevention"
+      ]
+    },
+    {
+      "id": "BTA-010",
+      "name": "Statistics and Frequency Analysis",
+      "purpose": "Analyze large text files to find counts, distributions, repeated lines, top terms, and anomalies.",
+      "requirements": [
+        {
+          "id": "BTA-010-001",
+          "title": "Count lines, words, bytes, characters",
+          "priority": "MUST",
+          "description": "Count lines, words, bytes, characters",
+          "acceptance_criteria": [
+            "User can use: Count lines, words, bytes, characters.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-002",
+          "title": "Count empty and whitespace-only lines",
+          "priority": "SHOULD",
+          "description": "Count empty and whitespace-only lines",
+          "acceptance_criteria": [
+            "User can use: Count empty and whitespace-only lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-003",
+          "title": "Find longest and shortest lines",
+          "priority": "SHOULD",
+          "description": "Find longest and shortest lines",
+          "acceptance_criteria": [
+            "User can use: Find longest and shortest lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-004",
+          "title": "Find most common lines",
+          "priority": "SHOULD",
+          "description": "Find most common lines",
+          "acceptance_criteria": [
+            "User can use: Find most common lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-005",
+          "title": "Find duplicate lines",
+          "priority": "SHOULD",
+          "description": "Find duplicate lines",
+          "acceptance_criteria": [
+            "User can use: Find duplicate lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-006",
+          "title": "Find unique lines",
+          "priority": "SHOULD",
+          "description": "Find unique lines",
+          "acceptance_criteria": [
+            "User can use: Find unique lines.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-007",
+          "title": "Find most common words/tokens",
+          "priority": "SHOULD",
+          "description": "Find most common words/tokens",
+          "acceptance_criteria": [
+            "User can use: Find most common words/tokens.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-008",
+          "title": "Find most common IPs, URLs, errors, IDs using pattern categories",
+          "priority": "SHOULD",
+          "description": "Find most common IPs, URLs, errors, IDs using pattern categories",
+          "acceptance_criteria": [
+            "User can use: Find most common IPs, URLs, errors, IDs using pattern categories.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-009",
+          "title": "Export statistics report",
+          "priority": "SHOULD",
+          "description": "Export statistics report",
+          "acceptance_criteria": [
+            "User can use: Export statistics report.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-010-010",
+          "title": "Allow approximate counting for huge files",
+          "priority": "COULD",
+          "description": "Allow approximate counting for huge files",
+          "acceptance_criteria": [
+            "User can use: Allow approximate counting for huge files.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-010-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-010-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "StatsEngine::start(document_id, stats_plan) -> TaskId",
+        "StatsEngine::snapshot(task_id) -> StatsSnapshot",
+        "StatsEngine::export(task_id, path, format) -> Result<()>"
+      ],
+      "data_structures": [
+        "StatsSnapshot { scanned_bytes, line_count, word_count, top_tokens, duplicate_lines, anomalies }"
+      ],
+      "performance_budget": {
+        "must_stream": true,
+        "approx_mode_available": true
+      },
+      "edge_cases": [
+        "Huge number of unique tokens",
+        "Memory pressure",
+        "Binary-looking text",
+        "Extremely long lines"
+      ]
+    },
+    {
+      "id": "BTA-011",
+      "name": "Bookmarks, Notes, and Timeline",
+      "purpose": "Advanced investigation workflow for marking lines, categories, comments, and navigation points.",
+      "requirements": [
+        {
+          "id": "BTA-011-001",
+          "title": "Create bookmark on line",
+          "priority": "MUST",
+          "description": "Create bookmark on line",
+          "acceptance_criteria": [
+            "User can use: Create bookmark on line.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-002",
+          "title": "Create colored bookmark categories",
+          "priority": "MUST",
+          "description": "Create colored bookmark categories",
+          "acceptance_criteria": [
+            "User can use: Create colored bookmark categories.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-003",
+          "title": "Create bookmark note/comment",
+          "priority": "SHOULD",
+          "description": "Create bookmark note/comment",
+          "acceptance_criteria": [
+            "User can use: Create bookmark note/comment.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-004",
+          "title": "Bookmark all search results",
+          "priority": "SHOULD",
+          "description": "Bookmark all search results",
+          "acceptance_criteria": [
+            "User can use: Bookmark all search results.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-005",
+          "title": "Bookmark all log errors",
+          "priority": "SHOULD",
+          "description": "Bookmark all log errors",
+          "acceptance_criteria": [
+            "User can use: Bookmark all log errors.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-006",
+          "title": "Bookmark timeline panel",
+          "priority": "SHOULD",
+          "description": "Bookmark timeline panel",
+          "acceptance_criteria": [
+            "User can use: Bookmark timeline panel.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-007",
+          "title": "Export bookmarks and notes",
+          "priority": "SHOULD",
+          "description": "Export bookmarks and notes",
+          "acceptance_criteria": [
+            "User can use: Export bookmarks and notes.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-011-008",
+          "title": "Persist bookmarks in session without modifying source file",
+          "priority": "MUST",
+          "description": "Persist bookmarks in session without modifying source file",
+          "acceptance_criteria": [
+            "User can use: Persist bookmarks in session without modifying source file.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-011-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-011-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "BookmarkStore::add(document_id, bookmark) -> BookmarkId",
+        "BookmarkStore::list(document_id, filter) -> Vec<Bookmark>",
+        "BookmarkStore::export(document_id, path) -> Result<()>"
+      ],
+      "data_structures": [
+        "Bookmark { id, document_id, line_ref, byte_offset, category, color, note, created_at }"
+      ],
+      "performance_budget": {
+        "bookmark_navigation_target_ms": 10
+      },
+      "edge_cases": [
+        "File changes and line numbers shift",
+        "Bookmark points to deleted line after reload",
+        "Millions of bookmarks from search"
+      ]
+    },
+    {
+      "id": "BTA-012",
+      "name": "Analysis Pipelines",
+      "purpose": "Reusable visual or declarative pipelines for grep/awk/sort/uniq-like workflows.",
+      "requirements": [
+        {
+          "id": "BTA-012-001",
+          "title": "Create pipeline with stages",
+          "priority": "MUST",
+          "description": "Create pipeline with stages",
+          "acceptance_criteria": [
+            "User can use: Create pipeline with stages.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-002",
+          "title": "Filter stage",
+          "priority": "MUST",
+          "description": "Filter stage",
+          "acceptance_criteria": [
+            "User can use: Filter stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-003",
+          "title": "Extract stage",
+          "priority": "MUST",
+          "description": "Extract stage",
+          "acceptance_criteria": [
+            "User can use: Extract stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-004",
+          "title": "Transform stage",
+          "priority": "SHOULD",
+          "description": "Transform stage",
+          "acceptance_criteria": [
+            "User can use: Transform stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-005",
+          "title": "Group by stage",
+          "priority": "SHOULD",
+          "description": "Group by stage",
+          "acceptance_criteria": [
+            "User can use: Group by stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-006",
+          "title": "Count stage",
+          "priority": "SHOULD",
+          "description": "Count stage",
+          "acceptance_criteria": [
+            "User can use: Count stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-007",
+          "title": "Sort stage",
+          "priority": "SHOULD",
+          "description": "Sort stage",
+          "acceptance_criteria": [
+            "User can use: Sort stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-008",
+          "title": "Dedupe stage",
+          "priority": "SHOULD",
+          "description": "Dedupe stage",
+          "acceptance_criteria": [
+            "User can use: Dedupe stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-009",
+          "title": "Export stage",
+          "priority": "MUST",
+          "description": "Export stage",
+          "acceptance_criteria": [
+            "User can use: Export stage.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-010",
+          "title": "Save and reuse pipeline",
+          "priority": "MUST",
+          "description": "Save and reuse pipeline",
+          "acceptance_criteria": [
+            "User can use: Save and reuse pipeline.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-011",
+          "title": "Run pipeline in streaming mode",
+          "priority": "MUST",
+          "description": "Run pipeline in streaming mode",
+          "acceptance_criteria": [
+            "User can use: Run pipeline in streaming mode.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-011 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-011 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-012",
+          "title": "Show intermediate stage preview",
+          "priority": "SHOULD",
+          "description": "Show intermediate stage preview",
+          "acceptance_criteria": [
+            "User can use: Show intermediate stage preview.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-012 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-012 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-013",
+          "title": "Cancel running pipeline",
+          "priority": "MUST",
+          "description": "Cancel running pipeline",
+          "acceptance_criteria": [
+            "User can use: Cancel running pipeline.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-013 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-013 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-012-014",
+          "title": "Import/export pipeline as JSON",
+          "priority": "MUST",
+          "description": "Import/export pipeline as JSON",
+          "acceptance_criteria": [
+            "User can use: Import/export pipeline as JSON.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-012-014 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-012-014 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "Pipeline::parse(json) -> Result<PipelineDefinition>",
+        "Pipeline::run(document_id, pipeline) -> TaskId",
+        "Pipeline::preview_stage(task_id, stage_id, limit) -> PreviewRows",
+        "Pipeline::cancel(task_id)"
+      ],
+      "data_structures": [
+        "PipelineDefinition { id, name, stages, input, output }",
+        "PipelineStage { id, kind, config }",
+        "PipelineRun { task_id, status, progress, diagnostics }"
+      ],
+      "performance_budget": {
+        "must_stream": true,
+        "stage_preview_target_ms": 500,
+        "pipeline_memory_budget_mb_default": 128
+      },
+      "edge_cases": [
+        "Pipeline stage produces huge intermediate output",
+        "Invalid pipeline JSON",
+        "Export target not writable",
+        "Sort/group requires more memory than budget"
+      ]
+    },
+    {
+      "id": "BTA-013",
+      "name": "Performance and Activity Diagnostics",
+      "purpose": "Expose memory, CPU, chunks, threads, background tasks, and rendering health.",
+      "requirements": [
+        {
+          "id": "BTA-013-001",
+          "title": "Show file size and mapped bytes",
+          "priority": "MUST",
+          "description": "Show file size and mapped bytes",
+          "acceptance_criteria": [
+            "User can use: Show file size and mapped bytes.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-002",
+          "title": "Show RAM used by document",
+          "priority": "SHOULD",
+          "description": "Show RAM used by document",
+          "acceptance_criteria": [
+            "User can use: Show RAM used by document.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-003",
+          "title": "Show chunk cache size",
+          "priority": "SHOULD",
+          "description": "Show chunk cache size",
+          "acceptance_criteria": [
+            "User can use: Show chunk cache size.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-004",
+          "title": "Show visible line count",
+          "priority": "SHOULD",
+          "description": "Show visible line count",
+          "acceptance_criteria": [
+            "User can use: Show visible line count.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-005",
+          "title": "Show active background tasks",
+          "priority": "MUST",
+          "description": "Show active background tasks",
+          "acceptance_criteria": [
+            "User can use: Show active background tasks.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-006",
+          "title": "Cancel background tasks",
+          "priority": "MUST",
+          "description": "Cancel background tasks",
+          "acceptance_criteria": [
+            "User can use: Cancel background tasks.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-007",
+          "title": "Pause/resume long-running analysis tasks",
+          "priority": "SHOULD",
+          "description": "Pause/resume long-running analysis tasks",
+          "acceptance_criteria": [
+            "User can use: Pause/resume long-running analysis tasks.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-008",
+          "title": "Show search speed",
+          "priority": "SHOULD",
+          "description": "Show search speed",
+          "acceptance_criteria": [
+            "User can use: Show search speed.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-009",
+          "title": "Show rendering FPS/debug metrics",
+          "priority": "COULD",
+          "description": "Show rendering FPS/debug metrics",
+          "acceptance_criteria": [
+            "User can use: Show rendering FPS/debug metrics.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-013-010",
+          "title": "Warn when memory budget is exceeded",
+          "priority": "MUST",
+          "description": "Warn when memory budget is exceeded",
+          "acceptance_criteria": [
+            "User can use: Warn when memory budget is exceeded.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-013-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-013-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "Diagnostics::snapshot() -> DiagnosticsSnapshot",
+        "TaskManager::list() -> Vec<TaskInfo>",
+        "TaskManager::cancel(task_id) -> Result<()>"
+      ],
+      "data_structures": [
+        "DiagnosticsSnapshot { memory, file_maps, chunk_cache, render_stats, task_stats }",
+        "TaskInfo { id, kind, status, progress, cancellable }"
+      ],
+      "performance_budget": {
+        "diagnostics_refresh_interval_ms": 500,
+        "diagnostics_must_be_low_overhead": true
+      },
+      "edge_cases": [
+        "Task stuck",
+        "Memory pressure",
+        "File mmap fails",
+        "Background worker panics"
+      ]
+    },
+    {
+      "id": "BTA-014",
+      "name": "Smart Copy and Export",
+      "purpose": "Copy or export selected/filter/search/pipeline results into useful formats.",
+      "requirements": [
+        {
+          "id": "BTA-014-001",
+          "title": "Copy as plain text",
+          "priority": "MUST",
+          "description": "Copy as plain text",
+          "acceptance_criteria": [
+            "User can use: Copy as plain text.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-001 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-001 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-002",
+          "title": "Copy as Markdown",
+          "priority": "SHOULD",
+          "description": "Copy as Markdown",
+          "acceptance_criteria": [
+            "User can use: Copy as Markdown.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-002 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-002 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-003",
+          "title": "Copy as CSV",
+          "priority": "SHOULD",
+          "description": "Copy as CSV",
+          "acceptance_criteria": [
+            "User can use: Copy as CSV.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-003 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-003 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-004",
+          "title": "Copy as JSON",
+          "priority": "SHOULD",
+          "description": "Copy as JSON",
+          "acceptance_criteria": [
+            "User can use: Copy as JSON.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-004 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-004 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-005",
+          "title": "Copy as HTML with highlighting",
+          "priority": "SHOULD",
+          "description": "Copy as HTML with highlighting",
+          "acceptance_criteria": [
+            "User can use: Copy as HTML with highlighting.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-005 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-005 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-006",
+          "title": "Export filtered view",
+          "priority": "SHOULD",
+          "description": "Export filtered view",
+          "acceptance_criteria": [
+            "User can use: Export filtered view.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-006 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-006 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-007",
+          "title": "Export search results",
+          "priority": "SHOULD",
+          "description": "Export search results",
+          "acceptance_criteria": [
+            "User can use: Export search results.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-007 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-007 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-008",
+          "title": "Export extracted entities",
+          "priority": "SHOULD",
+          "description": "Export extracted entities",
+          "acceptance_criteria": [
+            "User can use: Export extracted entities.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-008 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-008 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-009",
+          "title": "Export statistics report",
+          "priority": "SHOULD",
+          "description": "Export statistics report",
+          "acceptance_criteria": [
+            "User can use: Export statistics report.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-009 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-009 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        },
+        {
+          "id": "BTA-014-010",
+          "title": "Export investigation bundle",
+          "priority": "COULD",
+          "description": "Export investigation bundle",
+          "acceptance_criteria": [
+            "User can use: Export investigation bundle.",
+            "Feature must not block typing, scrolling, or visible rendering.",
+            "Feature must fail safely with a clear user-visible error."
+          ],
+          "implementation_notes": [],
+          "test_cases": [
+            {
+              "name": "BTA-014-010 basic behavior",
+              "type": "functional",
+              "expected": "Feature works as specified."
+            },
+            {
+              "name": "BTA-014-010 huge file behavior",
+              "type": "performance",
+              "expected": "Feature remains responsive on large files."
+            }
+          ]
+        }
+      ],
+      "suggested_api": [
+        "SmartCopy::copy(selection_or_view, format) -> Result<ClipboardPayload>",
+        "Export::write(source, format, path, options) -> Result<()>"
+      ],
+      "data_structures": [
+        "ExportSource { selection, filter_view, search_results, pipeline_output, stats_report }",
+        "ExportFormat { text, markdown, csv, json, html }"
+      ],
+      "performance_budget": {
+        "large_export_must_stream": true
+      },
+      "edge_cases": [
+        "Huge export",
+        "Clipboard size too large",
+        "Format escaping issues",
+        "Sensitive data masking"
+      ]
+    }
+  ],
+  "codex_implementation_guidance": {
+    "repo_additions": {
+      "crates/analysis_mode": "Read-only analysis mode capabilities and policy decisions",
+      "crates/streaming_search": "Chunked literal/regex search with live results",
+      "crates/filter_engine": "Non-destructive filtered views",
+      "crates/text_query": "Query parser/compiler/executor",
+      "crates/log_mode": "Log detection, log level parsing, tail/follow mode",
+      "crates/inspectors": "Line/token/byte inspectors",
+      "crates/pattern_detector": "Entity detection and extraction",
+      "crates/stats_engine": "Streaming stats and frequency analysis",
+      "crates/pipeline_engine": "Reusable analysis pipeline runtime",
+      "crates/diagnostics": "Memory, task, chunk, render diagnostics"
+    },
+    "implementation_rules": [
+      "Do not implement big-file analysis by loading full file into memory.",
+      "Use byte offsets as stable references where possible.",
+      "Use lazy line index for huge files.",
+      "Use progress events for every scan.",
+      "Use cancellation tokens for every background task.",
+      "Use bounded result buffers and spill-to-disk if necessary.",
+      "Never allow analysis features to mutate original file unless user explicitly exports or converts.",
+      "Keep analysis engines UI-independent and unit-testable."
+    ],
+    "recommended_rust_crates": [
+      "memmap2",
+      "regex",
+      "regex-automata",
+      "bstr",
+      "aho-corasick",
+      "rayon",
+      "tokio",
+      "serde",
+      "serde_json",
+      "csv",
+      "chrono",
+      "indexmap"
+    ]
+  },
+  "mvp_priority_order": [
+    "Read-Only Analysis Mode",
+    "Streaming Search with Live Results",
+    "Live Filter Mode",
+    "File Intelligence Panel",
+    "Log File Mode",
+    "Line Inspector",
+    "Bookmarks and Notes",
+    "Statistics and Frequency Analysis",
+    "Pattern Detection and Data Extraction",
+    "Analysis Pipelines",
+    "Performance and Activity Diagnostics"
+  ],
+  "traceability_index": [
+    {
+      "id": "BTA-001-001",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Automatically enable Read-Only Analysis Mode for huge files",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-001-002",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Manual toggle for Read-Only Analysis Mode",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-001-003",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Disable destructive editing commands in analysis mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-001-004",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Allow copy, search, filter, bookmark, and export in analysis mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-001-005",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Show active optimizations in mode banner",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-001-006",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Allow safe conversion from analysis mode to editable mode",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-001-007",
+      "module": "BTA-001",
+      "module_name": "Read-Only Analysis Mode",
+      "title": "Warn before converting huge file to editable mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-001",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show file name, path, size, modified time, owner, and permissions",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-002",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show detected encoding and BOM status",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-003",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show detected line ending type",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-004",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Estimate total line count lazily for huge files",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-005",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show longest line and average line length",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-002-006",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Detect binary/text confidence score",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-007",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Detect likely file type: log, CSV, JSON, XML, SQL, source, markdown, binary",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-002-008",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show warning for very long lines",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-002-009",
+      "module": "BTA-002",
+      "module_name": "File Intelligence Panel",
+      "title": "Show statistics progress when still scanning",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-001",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Start search before full file is indexed",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-002",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Show live result count while searching",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-003",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Allow navigation to results before search completes",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-004",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support literal search",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-005",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support regex search",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-006",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support case-sensitive and case-insensitive search",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-007",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support whole-word search",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-008",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support search cancellation",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-009",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Support result limit with continue option",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-003-010",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Show match context lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-003-011",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Export search results",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-003-012",
+      "module": "BTA-003",
+      "module_name": "Streaming Search with Live Results",
+      "title": "Keep multiple search result tabs",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-004-001",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Show only lines containing text",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-004-002",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Show only lines matching regex",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-004-003",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Hide matching lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-004-004",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Combine multiple filters with AND/OR/NOT",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-004-005",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Keep original file untouched",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-004-006",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Show hidden line count",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-004-007",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Allow export of filtered view",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-004-008",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Allow filters to be saved and reused",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-004-009",
+      "module": "BTA-004",
+      "module_name": "Live Filter Mode",
+      "title": "Allow filter preview before applying",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-005-001",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support contains('text') query",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-005-002",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support regex('pattern') query",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-005-003",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support AND, OR, NOT",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-005-004",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support field comparisons for structured logs",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-005-005",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support timestamp comparisons when timestamps detected",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-005-006",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Support saved queries",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-005-007",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Show query parse errors clearly",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-005-008",
+      "module": "BTA-005",
+      "module_name": "Text Query Language",
+      "title": "Compile query into streaming execution plan",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-006-001",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Auto-detect log files",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-006-002",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Highlight ERROR, WARN, INFO, DEBUG, TRACE levels",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-006-003",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Filter by log level",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-006-004",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Jump to next/previous error",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-006-005",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Bookmark all errors",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-006-006",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Parse timestamps from common formats",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-006-007",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Timeline view by timestamp",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-006-008",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Collapse repeated messages",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-006-009",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Tail/follow file mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-006-010",
+      "module": "BTA-006",
+      "module_name": "Log File Mode",
+      "title": "Pause follow mode without closing file",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-007-001",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "CSV table view for large CSV files",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-002",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "CSV column resizing",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-003",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "CSV column filter",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-004",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "CSV column sort using streaming/indexed mode",
+      "priority": "COULD"
+    },
+    {
+      "id": "BTA-007-005",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "JSON tree viewer",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-006",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "JSON pretty print",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-007",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "JSON minify",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-008",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "JSON path search",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-009",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "XML tree viewer",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-010",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "XPath search",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-011",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "SQL statement splitter",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-007-012",
+      "module": "BTA-007",
+      "module_name": "Structured Data Modes",
+      "title": "Line-delimited JSON record mode",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-008-001",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Line inspector",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-008-002",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Token inspector",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-008-003",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Byte offset inspector",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-008-004",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Hex view for selected bytes",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-008-005",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Show line length, byte offset, hash, whitespace, and Unicode details",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-008-006",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Show token occurrence count",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-008-007",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Show first/last occurrence for selected token",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-008-008",
+      "module": "BTA-008",
+      "module_name": "Inspectors",
+      "title": "Show surrounding context",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-001",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect emails",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-002",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect URLs",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-003",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect IPv4 and IPv6 addresses",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-004",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect UUIDs",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-005",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect JWT-like tokens",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-006",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect Base64-like strings",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-007",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect hex strings",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-008",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Detect ISO dates and timestamps",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-009",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Extract detected entities to CSV",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-009-010",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Allow custom extraction regex",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-009-011",
+      "module": "BTA-009",
+      "module_name": "Pattern Detection and Data Extraction",
+      "title": "Mask sensitive values in preview when configured",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-010-001",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Count lines, words, bytes, characters",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-010-002",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Count empty and whitespace-only lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-003",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find longest and shortest lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-004",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find most common lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-005",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find duplicate lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-006",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find unique lines",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-007",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find most common words/tokens",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-008",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Find most common IPs, URLs, errors, IDs using pattern categories",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-009",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Export statistics report",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-010-010",
+      "module": "BTA-010",
+      "module_name": "Statistics and Frequency Analysis",
+      "title": "Allow approximate counting for huge files",
+      "priority": "COULD"
+    },
+    {
+      "id": "BTA-011-001",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Create bookmark on line",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-011-002",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Create colored bookmark categories",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-011-003",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Create bookmark note/comment",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-011-004",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Bookmark all search results",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-011-005",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Bookmark all log errors",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-011-006",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Bookmark timeline panel",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-011-007",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Export bookmarks and notes",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-011-008",
+      "module": "BTA-011",
+      "module_name": "Bookmarks, Notes, and Timeline",
+      "title": "Persist bookmarks in session without modifying source file",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-001",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Create pipeline with stages",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-002",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Filter stage",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-003",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Extract stage",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-004",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Transform stage",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-005",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Group by stage",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-006",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Count stage",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-007",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Sort stage",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-008",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Dedupe stage",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-009",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Export stage",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-010",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Save and reuse pipeline",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-011",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Run pipeline in streaming mode",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-012",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Show intermediate stage preview",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-012-013",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Cancel running pipeline",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-012-014",
+      "module": "BTA-012",
+      "module_name": "Analysis Pipelines",
+      "title": "Import/export pipeline as JSON",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-013-001",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show file size and mapped bytes",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-013-002",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show RAM used by document",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-013-003",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show chunk cache size",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-013-004",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show visible line count",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-013-005",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show active background tasks",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-013-006",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Cancel background tasks",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-013-007",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Pause/resume long-running analysis tasks",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-013-008",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show search speed",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-013-009",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Show rendering FPS/debug metrics",
+      "priority": "COULD"
+    },
+    {
+      "id": "BTA-013-010",
+      "module": "BTA-013",
+      "module_name": "Performance and Activity Diagnostics",
+      "title": "Warn when memory budget is exceeded",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-014-001",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Copy as plain text",
+      "priority": "MUST"
+    },
+    {
+      "id": "BTA-014-002",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Copy as Markdown",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-003",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Copy as CSV",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-004",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Copy as JSON",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-005",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Copy as HTML with highlighting",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-006",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Export filtered view",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-007",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Export search results",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-008",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Export extracted entities",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-009",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Export statistics report",
+      "priority": "SHOULD"
+    },
+    {
+      "id": "BTA-014-010",
+      "module": "BTA-014",
+      "module_name": "Smart Copy and Export",
+      "title": "Export investigation bundle",
+      "priority": "COULD"
+    }
+  ],
+  "summary": {
+    "module_count": 14,
+    "requirement_count": 138,
+    "must_count": 56,
+    "should_count": 78,
+    "could_count": 4
+  }
+}
