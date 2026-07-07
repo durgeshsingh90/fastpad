@@ -145,6 +145,7 @@ dependencies = [
  "core-graphics",
  "fastpad_core",
  "fastpad_render",
+ "fastpad_tasks",
  "fastpad_viewport",
  "libc",
  "objc",

@@ -814,6 +814,32 @@ pub struct TabSummary {
     pub active: bool,
 }
 
+pub struct PendingOpenDocument {
+    id: DocumentId,
+    path: PathBuf,
+    settings: AppSettings,
+    intent: OpenIntent,
+}
+
+impl PendingOpenDocument {
+    pub fn document_id(&self) -> DocumentId {
+        self.id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn open(self) -> Result<Document> {
+        Document::open(self.id, self.path, &self.settings, self.intent)
+    }
+}
+
+pub enum OpenTabRequest {
+    Existing(TabId),
+    Pending(PendingOpenDocument),
+}
+
 pub struct DocumentManager {
     settings: AppSettings,
     next_document_id: u64,
@@ -867,6 +893,44 @@ impl DocumentManager {
     pub fn open_tab(&mut self, path: impl AsRef<Path>, intent: OpenIntent) -> Result<TabId> {
         let document_id = self.document_id_for_path(path.as_ref(), intent)?;
         Ok(self.create_tab_for_document(document_id))
+    }
+
+    pub fn begin_open_tab(
+        &mut self,
+        path: impl AsRef<Path>,
+        intent: OpenIntent,
+    ) -> Result<OpenTabRequest> {
+        let path = path.as_ref();
+        let index_path = normalized_path(path);
+        if let Some(id) = self.path_index.get(&index_path).copied() {
+            if self.documents.contains_key(&id) {
+                return Ok(OpenTabRequest::Existing(self.create_tab_for_document(id)));
+            }
+        }
+
+        let id = self.allocate_document_id();
+        Ok(OpenTabRequest::Pending(PendingOpenDocument {
+            id,
+            path: path.to_path_buf(),
+            settings: self.settings.clone(),
+            intent,
+        }))
+    }
+
+    pub fn finish_open_tab(&mut self, document: Document) -> TabId {
+        let document_id = document.id();
+        if let Some(path) = document.path().map(Path::to_path_buf) {
+            let index_path = normalized_path(&path);
+            if let Some(existing_id) = self.path_index.get(&index_path).copied() {
+                if self.documents.contains_key(&existing_id) {
+                    return self.create_tab_for_document(existing_id);
+                }
+            }
+            self.path_index.insert(index_path, document_id);
+        }
+        self.documents
+            .insert(document_id, Arc::new(RwLock::new(document)));
+        self.create_tab_for_document(document_id)
     }
 
     pub fn new_untitled(&mut self) -> DocumentId {
@@ -1346,6 +1410,52 @@ mod tests {
         assert_eq!(summaries[0].document_id, summaries[1].document_id);
         assert_ne!(summaries[0].view_id, summaries[1].view_id);
         assert!(summaries[1].active);
+    }
+
+    #[test]
+    fn background_open_finishes_as_active_tab() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "opened later").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let pending = match manager
+            .begin_open_tab(tmp.path(), OpenIntent::default())
+            .unwrap()
+        {
+            OpenTabRequest::Pending(pending) => pending,
+            OpenTabRequest::Existing(_) => panic!("new path should not already be open"),
+        };
+
+        assert_eq!(manager.document_count(), 0);
+        assert_eq!(manager.tab_count(), 0);
+
+        let document = pending.open().unwrap();
+        let tab = manager.finish_open_tab(document);
+
+        assert_eq!(manager.document_count(), 1);
+        assert_eq!(manager.tab_count(), 1);
+        assert_eq!(manager.active_tab_id(), Some(tab));
+    }
+
+    #[test]
+    fn begin_open_tab_reuses_existing_document_immediately() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "shared").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let first_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
+        let second_tab = match manager
+            .begin_open_tab(tmp.path(), OpenIntent::default())
+            .unwrap()
+        {
+            OpenTabRequest::Existing(tab) => tab,
+            OpenTabRequest::Pending(_) => panic!("existing path should not start background work"),
+        };
+
+        assert_ne!(first_tab, second_tab);
+        assert_eq!(manager.document_count(), 1);
+        assert_eq!(manager.tab_count(), 2);
+        assert_eq!(manager.active_tab_id(), Some(second_tab));
     }
 
     #[test]

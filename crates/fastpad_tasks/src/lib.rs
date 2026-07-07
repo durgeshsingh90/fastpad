@@ -94,6 +94,13 @@ impl<T: Send + 'static> TaskHandle<T> {
         &self.progress
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .map(|join| join.is_finished())
+            .unwrap_or(true)
+    }
+
     pub fn join(mut self) -> Result<T, TaskError> {
         self.join
             .take()
@@ -124,5 +131,25 @@ impl ProgressThrottle {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_handle_reports_finished_before_join() {
+        let handle = TaskHandle::spawn("finished", |_token, _progress| 42);
+
+        for _ in 0..100 {
+            if handle.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(handle.is_finished());
+        assert_eq!(handle.join().unwrap(), 42);
     }
 }

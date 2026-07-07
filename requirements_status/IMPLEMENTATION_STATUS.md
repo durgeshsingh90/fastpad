@@ -48,6 +48,7 @@ Current implemented components:
 | Lazy line index | `fastpad_line_index::LazyLineIndex` |
 | Viewport engine | `fastpad_viewport::ViewportEngine` |
 | Custom virtual renderer foundation | `fastpad_render` overscan render plans, line-number gutter data, horizontal long-line clipping, layout cache keys, and AppKit View/Analysis virtual view |
+| Async open task integration | `DocumentManager::begin_open_tab`/`finish_open_tab`, `TaskHandle::is_finished`, and AppKit timer polling keep file open, metadata inspection, mmap setup, mode selection, and edit-buffer load off the UI thread |
 | Search core | `fastpad_search` literal/regex chunk scanning with cancellation checks |
 | Edit buffer | `fastpad_edit` rope buffer, undo/redo transactions |
 | Replace core | `fastpad_replace` literal/regex replace and preview |
@@ -65,9 +66,9 @@ Recent verification performed before this report:
 - `./scripts/smoke_attached_files.sh`
 - `scripts/build_macos_app.sh && codesign --verify --deep --strict --verbose=2 FastPad.app`
 
-Latest verification after completing the adaptive-engine and renderer foundation items:
+Latest verification after completing the adaptive-engine, renderer foundation, and async-open items:
 
-- `cargo fmt --all`
+- `cargo fmt --all -- --check`
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets`
 - `scripts/build_macos_app.sh`
@@ -108,8 +109,8 @@ This file contains 410 requirements: 56 global requirements plus 354 module requ
 
 | Module | Approx. Done | Approx. Left | Current status |
 |---|---:|---:|---|
-| MOD-001 Application Shell | 45% | 55% | Launch, window, menus, file open, save flows, quit prompt, app icon, single-window tab strip. Missing multi-window, safe mode, session restore, drag/drop tabs, split UI. |
-| MOD-002 Document Manager | 45% | 55% | Shared documents, tabs/views, dirty state, open/save/save-as/copy. Missing close/reopen lifecycle, external modification prompts, persisted sessions. |
+| MOD-001 Application Shell | 50% | 50% | Launch, window, menus, background file open, save flows, quit prompt, app icon, single-window tab strip. Missing multi-window, safe mode, session restore, drag/drop tabs, split UI. |
+| MOD-002 Document Manager | 50% | 50% | Shared documents, tabs/views, two-phase background-open insertion, dirty state, open/save/save-as/copy. Missing close/reopen lifecycle, external modification prompts, persisted sessions. |
 | MOD-003 File Engine | 45% | 55% | mmap/chunk reads, metadata/sample detection, atomic write. Missing file watch integration, backups, conversions. |
 | MOD-004 Text Buffer | 35% | 65% | Rope buffer and basic edit operations. Missing full editor API, integration breadth, memory policies. |
 | MOD-005 Undo Redo Engine | 30% | 70% | Basic transactions. Missing grouping policy, memory limits, UI command integration. |
@@ -142,7 +143,7 @@ This overview maps to the same 24-module SRS as `fastpad_ai_native_complete_srs.
 Done:
 
 - Initial crate boundaries exist for many core systems.
-- Application shell, document manager, file engine, viewport, custom render-plan foundation, search, replace, edit buffer, task cancellation, and diagnostics foundations exist.
+- Application shell, document manager, file engine, viewport, custom render-plan foundation, async open task integration, search, replace, edit buffer, task cancellation, and diagnostics foundations exist.
 - Native menus show many Notepad++-style categories and placeholders.
 
 Not done:
@@ -215,7 +216,7 @@ This file contains 109 requirements across 12 engineering modules.
 | ENG-008 Edit Buffer Engine | 35% | 65% | Rope buffer, insert/delete/replace, undo/redo, atomic save. Missing block selection, multi-cursor, line operations. |
 | ENG-009 Replace and Sed-Like Transform Engine | 30% | 70% | Replace all, regex captures, preview, one undo transaction. Missing View Mode transforms/export/cancellation UI. |
 | ENG-010 Rendering Engine | 35% | 65% | Custom visible-only AppKit virtual view, overscan render plans, gutters, horizontal clipping, and layout cache keys. Missing overlays, syntax spans, selection/block rendering, dirty-region repaint breadth, and mature glyph shaping/layout cache. |
-| ENG-011 Task Scheduler and Cancellation | 25% | 75% | Cancellation token and task handle. Missing priority queues, task panel, throttling integration. |
+| ENG-011 Task Scheduler and Cancellation | 35% | 65% | Cancellation token, task handle, non-blocking completion polling, and background document-open integration. Missing priority queues, task panel, and broader search/filter/index throttling integration. |
 | ENG-012 Diagnostics and Benchmarking | 15% | 85% | Metrics/timers only. Missing benchmark suite, memory diagnostics, CI gates. |
 
 ### 7. `fastpad_true_engineering_blueprint_unix_style.md`
@@ -230,8 +231,8 @@ Done:
 
 Not done:
 
-- UI thread still has synchronous open/render paths in places.
-- Expensive operations are not all integrated as background UI tasks.
+- UI thread still has synchronous render paths in places.
+- Search/filter/index operations are not yet integrated into background UI tasks.
 - No benchmark proof for startup/open/search/memory budgets.
 - Custom viewport renderer foundation is not yet a full production renderer.
 - No complete follow/filter/pipeline/statistics UI.
@@ -259,13 +260,14 @@ Not done:
 
 Completed next pending item:
 
+- Async open task integration: file open, metadata inspection, mmap setup, mode selection, and edit-buffer load now run through background `TaskHandle`s, with AppKit polling completed tasks back onto the main thread.
 - Custom virtual renderer foundation for View/Analysis Mode: `fastpad_render` now produces bounded overscan render plans with gutter and horizontal clipping metadata, and the macOS app uses a custom read-only AppKit view for those plans.
 
 The following items block calling the application production-ready:
 
-1. Full async task integration so open/search/filter/indexing never block the UI.
-2. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
-3. Search/filter/tail UI with progressive results and cancellation controls.
+1. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
+2. Search/filter/tail UI with progressive results and cancellation controls.
+3. Background task integration for search/filter/indexing beyond file open.
 4. Close/reopen/recently closed tab lifecycle.
 5. Session restore: tabs, active tab, cursor/scroll, filters, search history, splits, bookmarks, zoom.
 6. File watching: external modification, deletion, truncation, log rotation.

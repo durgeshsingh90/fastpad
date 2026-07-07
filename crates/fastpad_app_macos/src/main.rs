@@ -7,8 +7,11 @@ use cocoa::appkit::{
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRange, NSRect, NSSize, NSString};
-use fastpad_core::{AppSettings, DocumentManager, EditorMode, OpenIntent, TabSummary};
+use fastpad_core::{
+    AppSettings, Document, DocumentManager, EditorMode, OpenIntent, OpenTabRequest, TabSummary,
+};
 use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
+use fastpad_tasks::{TaskHandle, TaskProgress};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
 use libc::c_char;
 use objc::declare::ClassDecl;
@@ -54,6 +57,7 @@ struct AppState {
     virtual_view: id,
     status_field: id,
     last_presented_text: String,
+    open_tasks: Vec<TaskHandle<anyhow::Result<Document>>>,
 }
 
 impl AppState {
@@ -74,6 +78,7 @@ impl AppState {
             virtual_view,
             status_field,
             last_presented_text: String::new(),
+            open_tasks: Vec::new(),
         }
     }
 
@@ -91,8 +96,32 @@ impl AppState {
     }
 
     unsafe fn open_path(&mut self, path: &Path) {
-        match self.manager.open_tab(path, OpenIntent::default()) {
-            Ok(_) => self.render_active_tab(),
+        match self.manager.begin_open_tab(path, OpenIntent::default()) {
+            Ok(OpenTabRequest::Existing(_)) => self.render_active_tab(),
+            Ok(OpenTabRequest::Pending(pending)) => {
+                let path = pending.path().to_path_buf();
+                let label = display_path(&path);
+                let task = TaskHandle::spawn(format!("open {label}"), move |token, progress| {
+                    let _ = progress.send(TaskProgress {
+                        name: "Open".into(),
+                        processed_bytes: 0,
+                        total_bytes: None,
+                        message: Some(format!("Opening {label}")),
+                    });
+                    token.throw_if_cancelled().map_err(anyhow::Error::from)?;
+                    let document = pending.open();
+                    token.throw_if_cancelled().map_err(anyhow::Error::from)?;
+                    document
+                });
+                set_status(
+                    self.status_field,
+                    &format!("Opening {}...", display_path(&path)),
+                );
+                if self.manager.active().is_none() {
+                    self.present_text(format!("Opening {}...", display_path(&path)), false);
+                }
+                self.open_tasks.push(task);
+            }
             Err(error) => self.show_error(&format!("Open failed: {error:#}")),
         }
     }
@@ -384,6 +413,34 @@ impl AppState {
         set_tab_bar(self.tab_bar, tabs);
     }
 
+    unsafe fn poll_background_tasks(&mut self) {
+        let mut index = 0usize;
+        while index < self.open_tasks.len() {
+            while let Ok(progress) = self.open_tasks[index].progress().try_recv() {
+                if let Some(message) = progress.message {
+                    set_status(self.status_field, &message);
+                }
+            }
+
+            if !self.open_tasks[index].is_finished() {
+                index += 1;
+                continue;
+            }
+
+            let task = self.open_tasks.swap_remove(index);
+            match task.join() {
+                Ok(Ok(document)) => {
+                    let title = document.title().to_string();
+                    self.manager.finish_open_tab(document);
+                    self.render_active_tab();
+                    set_status(self.status_field, &format!("Opened {title}"));
+                }
+                Ok(Err(error)) => self.show_error(&format!("Open failed: {error:#}")),
+                Err(error) => self.show_error(&format!("Open task failed: {error}")),
+            }
+        }
+    }
+
     unsafe fn save_copy_as(&mut self) -> bool {
         let Some(doc) = self.manager.active() else {
             return true;
@@ -477,6 +534,7 @@ fn main() {
         app.setDelegate_(delegate);
 
         build_menu(app, delegate);
+        install_background_task_timer(delegate);
         window.makeKeyAndOrderFront_(nil);
         app.activateIgnoringOtherApps_(YES);
 
@@ -590,6 +648,17 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
         virtual_view,
         status_field,
     )
+}
+
+unsafe fn install_background_task_timer(delegate: id) {
+    let _: id = msg_send![
+        class!(NSTimer),
+        scheduledTimerWithTimeInterval: 0.05f64
+        target: delegate
+        selector: sel!(pollBackgroundTasks:)
+        userInfo: nil
+        repeats: YES
+    ];
 }
 
 unsafe fn build_menu(app: id, delegate: id) {
@@ -1213,6 +1282,13 @@ fn window_title(title: &str, tabs: &[TabSummary]) -> String {
     format!("{active_index}/{count} {title} - FastPad")
 }
 
+fn display_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn virtual_text_view_class() -> *const Class {
     static REGISTER: Once = Once::new();
     static mut CLASS: *const Class = ptr::null();
@@ -1388,6 +1464,10 @@ fn app_delegate_class() -> *const Class {
             show_not_implemented as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(pollBackgroundTasks:),
+            poll_background_tasks as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(applicationShouldTerminate:),
             application_should_terminate as extern "C" fn(&Object, Sel, id) -> i64,
         );
@@ -1498,6 +1578,14 @@ extern "C" fn show_not_implemented(this: &Object, _: Sel, _: id) {
     unsafe {
         if let Some(state) = state_from_delegate(this) {
             state.show_not_implemented();
+        }
+    }
+}
+
+extern "C" fn poll_background_tasks(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.poll_background_tasks();
         }
     }
 }
