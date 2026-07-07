@@ -892,7 +892,7 @@ impl DocumentManager {
 
     pub fn open_tab(&mut self, path: impl AsRef<Path>, intent: OpenIntent) -> Result<TabId> {
         let document_id = self.document_id_for_path(path.as_ref(), intent)?;
-        Ok(self.create_tab_for_document(document_id))
+        Ok(self.activate_or_create_tab_for_document(document_id))
     }
 
     pub fn begin_open_tab(
@@ -904,7 +904,9 @@ impl DocumentManager {
         let index_path = normalized_path(path);
         if let Some(id) = self.path_index.get(&index_path).copied() {
             if self.documents.contains_key(&id) {
-                return Ok(OpenTabRequest::Existing(self.create_tab_for_document(id)));
+                return Ok(OpenTabRequest::Existing(
+                    self.activate_or_create_tab_for_document(id),
+                ));
             }
         }
 
@@ -923,7 +925,7 @@ impl DocumentManager {
             let index_path = normalized_path(&path);
             if let Some(existing_id) = self.path_index.get(&index_path).copied() {
                 if self.documents.contains_key(&existing_id) {
-                    return self.create_tab_for_document(existing_id);
+                    return self.activate_or_create_tab_for_document(existing_id);
                 }
             }
             self.path_index.insert(index_path, document_id);
@@ -1082,6 +1084,24 @@ impl DocumentManager {
         window.tabs.push(tab_id);
         window.active_tab = Some(tab_id);
         tab_id
+    }
+
+    fn activate_or_create_tab_for_document(&mut self, document_id: DocumentId) -> TabId {
+        if let Some(tab_id) = self.tab_for_document(document_id) {
+            let _ = self.set_active_tab(tab_id);
+            return tab_id;
+        }
+        self.create_tab_for_document(document_id)
+    }
+
+    fn tab_for_document(&self, document_id: DocumentId) -> Option<TabId> {
+        let window = self.windows.get(&self.active_window)?;
+        window.tabs.iter().copied().find(|tab_id| {
+            self.tabs
+                .get(tab_id)
+                .map(|tab| tab.document_id == document_id)
+                .unwrap_or(false)
+        })
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -1394,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_same_path_creates_lightweight_tabs_sharing_document() {
+    fn opening_same_path_activates_existing_primary_tab() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         writeln!(tmp, "shared").unwrap();
         let mut manager = DocumentManager::new(AppSettings::default());
@@ -1402,14 +1422,10 @@ mod tests {
         let first_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
         let second_tab = manager.open_tab(tmp.path(), OpenIntent::default()).unwrap();
 
-        assert_ne!(first_tab, second_tab);
-        assert_eq!(manager.tab_count(), 2);
+        assert_eq!(first_tab, second_tab);
+        assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.document_count(), 1);
-
-        let summaries = manager.tab_summaries();
-        assert_eq!(summaries[0].document_id, summaries[1].document_id);
-        assert_ne!(summaries[0].view_id, summaries[1].view_id);
-        assert!(summaries[1].active);
+        assert_eq!(manager.active_tab_id(), Some(first_tab));
     }
 
     #[test]
@@ -1438,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn begin_open_tab_reuses_existing_document_immediately() {
+    fn begin_open_tab_activates_existing_document_immediately() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         writeln!(tmp, "shared").unwrap();
         let mut manager = DocumentManager::new(AppSettings::default());
@@ -1452,9 +1468,9 @@ mod tests {
             OpenTabRequest::Pending(_) => panic!("existing path should not start background work"),
         };
 
-        assert_ne!(first_tab, second_tab);
+        assert_eq!(first_tab, second_tab);
         assert_eq!(manager.document_count(), 1);
-        assert_eq!(manager.tab_count(), 2);
+        assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.active_tab_id(), Some(second_tab));
     }
 

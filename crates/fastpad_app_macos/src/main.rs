@@ -6,9 +6,10 @@ use cocoa::appkit::{
     NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRange, NSRect, NSSize, NSString};
+use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use fastpad_core::{
-    AppSettings, Document, DocumentManager, EditorMode, OpenIntent, OpenTabRequest, TabSummary,
+    AppSettings, Document, DocumentManager, EditorMode, OpenIntent, OpenTabRequest, TabId,
+    TabSummary,
 };
 use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
 use fastpad_tasks::{TaskHandle, TaskProgress};
@@ -39,12 +40,19 @@ const VIRTUAL_GUTTER_PADDING: f64 = 8.0;
 const VIRTUAL_GUTTER_CHAR_WIDTH: f64 = 8.0;
 const VIRTUAL_TEXT_PADDING: f64 = 10.0;
 const VIRTUAL_CHAR_WIDTH: f64 = 8.0;
+const TAB_BAR_HEIGHT: f64 = 30.0;
+const TAB_ITEM_HEIGHT: f64 = 22.0;
+const TAB_ITEM_TOP: f64 = 4.0;
+const TAB_ITEM_GAP: f64 = 6.0;
+const TAB_ITEM_PADDING_X: f64 = 10.0;
+const TAB_ITEM_MIN_WIDTH: f64 = 104.0;
+const TAB_ITEM_MAX_WIDTH: f64 = 280.0;
+const TAB_ITEM_CHAR_WIDTH: f64 = 8.0;
 
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
     static NSFontAttributeName: id;
     static NSForegroundColorAttributeName: id;
-    static NSBackgroundColorAttributeName: id;
     fn NSRectFill(rect: NSRect);
 }
 
@@ -391,6 +399,15 @@ impl AppState {
         }
     }
 
+    unsafe fn activate_tab_by_id(&mut self, tab_id: TabId) {
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+        if self.manager.set_active_tab(tab_id) {
+            self.render_active_tab();
+        }
+    }
+
     unsafe fn duplicate_active_tab(&mut self) {
         if !self.sync_active_edit_buffer() {
             return;
@@ -531,6 +548,7 @@ fn main() {
             status_field,
         )));
         (*delegate).set_ivar("state", state as *mut c_void);
+        set_tab_bar_app_state(tab_bar, state as *mut c_void);
         app.setDelegate_(delegate);
 
         build_menu(app, delegate);
@@ -578,7 +596,7 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
 
     let content: id = window.contentView();
     let bounds: NSRect = msg_send![content, bounds];
-    let tab_height = 30.;
+    let tab_height = TAB_BAR_HEIGHT;
     let status_height = 28.;
     let tab_frame = NSRect::new(
         NSPoint::new(10., bounds.size.height - tab_height + 4.),
@@ -603,17 +621,23 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
     let _: () =
         msg_send![scroll, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
 
-    let tab_bar: id = msg_send![class!(NSTextField), alloc];
-    let tab_bar: id = msg_send![tab_bar, initWithFrame: tab_frame];
-    let _: () = msg_send![tab_bar, setEditable: NO];
-    let _: () = msg_send![tab_bar, setSelectable: NO];
-    let _: () = msg_send![tab_bar, setBordered: NO];
-    let _: () = msg_send![tab_bar, setDrawsBackground: YES];
-    let tab_font: id = msg_send![class!(NSFont), systemFontOfSize: 12.0f64];
-    let _: () = msg_send![tab_bar, setFont: tab_font];
+    let tab_scroll: id = msg_send![class!(NSScrollView), alloc];
+    let tab_scroll: id = msg_send![tab_scroll, initWithFrame: tab_frame];
+    let _: () = msg_send![tab_scroll, setHasHorizontalScroller: YES];
+    let _: () = msg_send![tab_scroll, setHasVerticalScroller: NO];
+    let _: () = msg_send![tab_scroll, setBorderType: 0u64];
+    let _: () = msg_send![tab_scroll, setDrawsBackground: NO];
+    let _: () =
+        msg_send![tab_scroll, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
+
+    let tab_bar = create_tab_bar_view(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(tab_frame.size.width, tab_frame.size.height),
+    ));
     let _: () =
         msg_send![tab_bar, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
-    content.addSubview_(tab_bar);
+    let _: () = msg_send![tab_scroll, setDocumentView: tab_bar];
+    content.addSubview_(tab_scroll);
 
     let text_view: id = msg_send![class!(NSTextView), alloc];
     let text_view: id = msg_send![text_view, initWithFrame: scroll_frame];
@@ -1042,6 +1066,219 @@ unsafe fn set_text_view(text_view: id, text: &str, editable: bool) {
     let _: () = msg_send![text_view, setEditable: if editable { YES } else { NO }];
 }
 
+#[derive(Clone, Debug)]
+struct TabBarItem {
+    id: TabId,
+    label: String,
+    active: bool,
+    x: f64,
+    width: f64,
+}
+
+#[derive(Default)]
+struct TabBarViewState {
+    app_state: *mut c_void,
+    items: Vec<TabBarItem>,
+}
+
+unsafe fn create_tab_bar_view(frame: NSRect) -> id {
+    let view_class = tab_bar_view_class();
+    let view: id = msg_send![view_class, alloc];
+    let view: id = msg_send![view, initWithFrame: frame];
+    let state = Box::into_raw(Box::new(TabBarViewState::default()));
+    (*view).set_ivar("state", state as *mut c_void);
+    view
+}
+
+unsafe fn set_tab_bar_app_state(tab_bar: id, app_state: *mut c_void) {
+    let state_ptr = *(*tab_bar).get_ivar::<*mut c_void>("state");
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &mut *(state_ptr as *mut TabBarViewState);
+    state.app_state = app_state;
+}
+
+unsafe fn set_tab_bar(tab_bar: id, tabs: &[TabSummary]) {
+    let state_ptr = *(*tab_bar).get_ivar::<*mut c_void>("state");
+    if state_ptr.is_null() {
+        return;
+    }
+
+    let state = &mut *(state_ptr as *mut TabBarViewState);
+    state.items = tab_bar_items(tabs);
+    let width = tab_bar_content_width(&state.items);
+    let _: () = msg_send![tab_bar, setFrameSize: NSSize::new(width, TAB_BAR_HEIGHT)];
+    let _: () = msg_send![tab_bar, setNeedsDisplay: YES];
+}
+
+fn tab_bar_items(tabs: &[TabSummary]) -> Vec<TabBarItem> {
+    let mut x = TAB_ITEM_GAP;
+    tabs.iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let label = tab_label(index + 1, tab);
+            let width = tab_item_width(&label);
+            let item = TabBarItem {
+                id: tab.id,
+                label,
+                active: tab.active,
+                x,
+                width,
+            };
+            x += width + TAB_ITEM_GAP;
+            item
+        })
+        .collect()
+}
+
+fn tab_item_width(label: &str) -> f64 {
+    ((label.chars().count() as f64 * TAB_ITEM_CHAR_WIDTH) + (TAB_ITEM_PADDING_X * 2.0))
+        .clamp(TAB_ITEM_MIN_WIDTH, TAB_ITEM_MAX_WIDTH)
+}
+
+fn tab_bar_content_width(items: &[TabBarItem]) -> f64 {
+    items
+        .last()
+        .map(|item| item.x + item.width + TAB_ITEM_GAP)
+        .unwrap_or(TAB_ITEM_MIN_WIDTH)
+}
+
+fn tab_bar_view_class() -> *const Class {
+    static REGISTER: Once = Once::new();
+    static mut CLASS: *const Class = ptr::null();
+    REGISTER.call_once(|| unsafe {
+        let superclass = class!(NSView);
+        let mut decl = ClassDecl::new("FastPadTabBarView", superclass).unwrap();
+        decl.add_ivar::<*mut c_void>("state");
+        decl.add_method(
+            sel!(isFlipped),
+            tab_bar_view_is_flipped as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(drawRect:),
+            tab_bar_view_draw_rect as extern "C" fn(&Object, Sel, NSRect),
+        );
+        decl.add_method(
+            sel!(mouseDown:),
+            tab_bar_view_mouse_down as extern "C" fn(&Object, Sel, id),
+        );
+        CLASS = decl.register();
+    });
+    unsafe { CLASS }
+}
+
+extern "C" fn tab_bar_view_is_flipped(_: &Object, _: Sel) -> BOOL {
+    YES
+}
+
+extern "C" fn tab_bar_view_draw_rect(this: &Object, _: Sel, dirty_rect: NSRect) {
+    unsafe {
+        let background: id = msg_send![class!(NSColor), controlBackgroundColor];
+        let _: () = msg_send![background, setFill];
+        NSRectFill(dirty_rect);
+
+        let state_ptr = *this.get_ivar::<*mut c_void>("state");
+        if state_ptr.is_null() {
+            return;
+        }
+        let state = &*(state_ptr as *const TabBarViewState);
+
+        if state.items.is_empty() {
+            let attrs = text_attributes(
+                msg_send![class!(NSFont), systemFontOfSize: 12.0f64],
+                msg_send![class!(NSColor), secondaryLabelColor],
+            );
+            draw_string("No tabs", NSPoint::new(TAB_ITEM_PADDING_X, 7.0), attrs);
+            return;
+        }
+
+        for item in &state.items {
+            draw_tab_bar_item(item);
+        }
+    }
+}
+
+unsafe fn draw_tab_bar_item(item: &TabBarItem) {
+    let rect = NSRect::new(
+        NSPoint::new(item.x, TAB_ITEM_TOP),
+        NSSize::new(item.width, TAB_ITEM_HEIGHT),
+    );
+    let fill: id = if item.active {
+        msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: 0.10f64
+            green: 0.36f64
+            blue: 0.82f64
+            alpha: 1.0f64
+        ]
+    } else {
+        msg_send![class!(NSColor), windowBackgroundColor]
+    };
+    let _: () = msg_send![fill, setFill];
+    NSRectFill(rect);
+
+    let border: id = if item.active {
+        msg_send![class!(NSColor), keyboardFocusIndicatorColor]
+    } else {
+        msg_send![class!(NSColor), separatorColor]
+    };
+    let _: () = msg_send![border, setFill];
+    NSRectFill(NSRect::new(
+        NSPoint::new(item.x, TAB_ITEM_TOP + TAB_ITEM_HEIGHT - 1.0),
+        NSSize::new(item.width, 1.0),
+    ));
+
+    let font: id = if item.active {
+        msg_send![class!(NSFont), boldSystemFontOfSize: 12.0f64]
+    } else {
+        msg_send![class!(NSFont), systemFontOfSize: 12.0f64]
+    };
+    let color: id = if item.active {
+        msg_send![class!(NSColor), whiteColor]
+    } else {
+        msg_send![class!(NSColor), labelColor]
+    };
+    let attrs = text_attributes(font, color);
+    let text_rect = NSRect::new(
+        NSPoint::new(item.x + TAB_ITEM_PADDING_X, TAB_ITEM_TOP + 4.0),
+        NSSize::new(
+            (item.width - (TAB_ITEM_PADDING_X * 2.0)).max(1.0),
+            TAB_ITEM_HEIGHT - 4.0,
+        ),
+    );
+    let _: () = msg_send![ns_string(&item.label), drawInRect: text_rect withAttributes: attrs];
+}
+
+extern "C" fn tab_bar_view_mouse_down(this: &Object, _: Sel, event: id) {
+    unsafe {
+        let event_location: NSPoint = msg_send![event, locationInWindow];
+        let point: NSPoint = msg_send![this, convertPoint: event_location fromView: nil];
+        let click_count: usize = msg_send![event, clickCount];
+        let state_ptr = *this.get_ivar::<*mut c_void>("state");
+        if state_ptr.is_null() {
+            return;
+        }
+        let state = &*(state_ptr as *const TabBarViewState);
+
+        let hit_tab = state
+            .items
+            .iter()
+            .find(|item| point.x >= item.x && point.x <= item.x + item.width)
+            .map(|item| item.id);
+
+        let Some(app_state) = (state.app_state as *mut AppState).as_mut() else {
+            return;
+        };
+
+        if let Some(tab_id) = hit_tab {
+            app_state.activate_tab_by_id(tab_id);
+        } else if click_count >= 2 {
+            app_state.new_document();
+        }
+    }
+}
+
 unsafe fn set_scroll_document_view(scroll_view: id, document_view: id) {
     let current: id = msg_send![scroll_view, documentView];
     if current != document_view {
@@ -1085,61 +1322,6 @@ fn virtual_content_size(plan: &RenderPlan) -> NSSize {
     let height =
         (plan.lines.len().max(1) as f64 * VIRTUAL_LINE_HEIGHT) + (VIRTUAL_TOP_PADDING * 2.0);
     NSSize::new(width, height)
-}
-
-unsafe fn set_tab_bar(tab_bar: id, tabs: &[TabSummary]) {
-    let render = tab_bar_render(tabs);
-    let attributed: id = msg_send![class!(NSMutableAttributedString), alloc];
-    let attributed: id = msg_send![attributed, initWithString: ns_string(&render.text)];
-
-    let full_range = NSRange::new(0, render.utf16_len() as _);
-    let normal_font: id = msg_send![class!(NSFont), systemFontOfSize: 12.0f64];
-    let text_color: id = msg_send![class!(NSColor), labelColor];
-    let _: () = msg_send![
-        attributed,
-        addAttribute: NSFontAttributeName
-        value: normal_font
-        range: full_range
-    ];
-    let _: () = msg_send![
-        attributed,
-        addAttribute: NSForegroundColorAttributeName
-        value: text_color
-        range: full_range
-    ];
-
-    if let Some((location, length)) = render.active_range_utf16 {
-        let active_range = NSRange::new(location as _, length as _);
-        let active_font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 12.0f64];
-        let active_text: id = msg_send![class!(NSColor), whiteColor];
-        let active_background: id = msg_send![
-            class!(NSColor),
-            colorWithCalibratedRed: 0.10f64
-            green: 0.36f64
-            blue: 0.82f64
-            alpha: 1.0f64
-        ];
-        let _: () = msg_send![
-            attributed,
-            addAttribute: NSFontAttributeName
-            value: active_font
-            range: active_range
-        ];
-        let _: () = msg_send![
-            attributed,
-            addAttribute: NSForegroundColorAttributeName
-            value: active_text
-            range: active_range
-        ];
-        let _: () = msg_send![
-            attributed,
-            addAttribute: NSBackgroundColorAttributeName
-            value: active_background
-            range: active_range
-        ];
-    }
-
-    let _: () = msg_send![tab_bar, setAttributedStringValue: attributed];
 }
 
 unsafe fn set_status(status_field: id, text: &str) {
@@ -1205,18 +1387,14 @@ unsafe fn nsstring_to_string(value: id) -> String {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct TabBarRender {
     text: String,
     active_range_utf16: Option<(usize, usize)>,
 }
 
-impl TabBarRender {
-    fn utf16_len(&self) -> usize {
-        self.text.encode_utf16().count()
-    }
-}
-
+#[cfg(test)]
 fn tab_bar_render(tabs: &[TabSummary]) -> TabBarRender {
     if tabs.is_empty() {
         return TabBarRender {
@@ -1249,7 +1427,7 @@ fn tab_bar_render(tabs: &[TabSummary]) -> TabBarRender {
 }
 
 fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
-    let icon = if tab.pinned { "📌" } else { "📄" };
+    let file_icon = file_icon_for_title(&tab.title);
     let mut flags = String::new();
     if tab.view_analysis {
         flags.push_str(" 👁");
@@ -1258,15 +1436,30 @@ fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
         flags.push_str(" *");
     }
     if tab.read_only {
-        flags.push_str(" RO");
+        flags.push_str(" 🔒");
     }
     if tab.external_modified {
-        flags.push_str(" !");
+        flags.push_str(" ⚠");
     }
+    let pin = if tab.pinned { "📌 " } else { "" };
     if tab.active {
-        format!("▶ {tab_number}. {icon} {}{flags}", tab.title)
+        format!("▶ {tab_number}. {pin}{file_icon} {}{flags}", tab.title)
     } else {
-        format!("{tab_number}. {icon} {}{flags}", tab.title)
+        format!("{tab_number}. {pin}{file_icon} {}{flags}", tab.title)
+    }
+}
+
+fn file_icon_for_title(title: &str) -> &'static str {
+    let extension = Path::new(title)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("csv" | "tsv") => "📊",
+        Some("json" | "jsonl" | "toml" | "yaml" | "yml" | "xml") => "⚙",
+        Some("log" | "out" | "trace" | "sql" | "dump") => "🧾",
+        Some("md" | "markdown" | "txt" | "text") => "📝",
+        _ => "📄",
     }
 }
 
@@ -1651,12 +1844,12 @@ mod tests {
         ];
 
         let render = tab_bar_render(&tabs);
-        let active_label = "▶ 2. 📄 second.txt";
+        let active_label = "▶ 2. 📝 second.txt";
         let active_start = render.text.find(active_label).unwrap();
 
-        assert!(render.text.contains("1. 📄 first.txt"));
+        assert!(render.text.contains("1. 📝 first.txt"));
         assert!(render.text.contains(active_label));
-        assert!(render.text.contains("3. 📄 third.txt"));
+        assert!(render.text.contains("3. 📝 third.txt"));
         assert_eq!(
             render.active_range_utf16,
             Some((
@@ -1664,6 +1857,25 @@ mod tests {
                 active_label.encode_utf16().count()
             ))
         );
+    }
+
+    #[test]
+    fn tab_labels_use_visible_state_icons() {
+        let mut tab = summary(1, "dump.sql", true);
+        tab.view_analysis = true;
+        tab.dirty = true;
+        tab.read_only = true;
+        tab.external_modified = true;
+        tab.pinned = true;
+
+        let label = tab_label(1, &tab);
+
+        assert!(label.contains("📌"));
+        assert!(label.contains("🧾"));
+        assert!(label.contains("👁"));
+        assert!(label.contains("*"));
+        assert!(label.contains("🔒"));
+        assert!(label.contains("⚠"));
     }
 
     #[test]
