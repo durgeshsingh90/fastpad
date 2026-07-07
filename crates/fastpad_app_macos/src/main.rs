@@ -1230,6 +1230,14 @@ unsafe fn draw_tab_bar_item(item: &TabBarItem) {
         NSPoint::new(item.x, TAB_ITEM_TOP + TAB_ITEM_HEIGHT - 1.0),
         NSSize::new(item.width, 1.0),
     ));
+    if item.active {
+        let accent: id = msg_send![class!(NSColor), whiteColor];
+        let _: () = msg_send![accent, setFill];
+        NSRectFill(NSRect::new(
+            NSPoint::new(item.x + 1.0, TAB_ITEM_TOP),
+            NSSize::new(item.width - 2.0, 2.0),
+        ));
+    }
 
     let font: id = if item.active {
         msg_send![class!(NSFont), boldSystemFontOfSize: 12.0f64]
@@ -1429,7 +1437,6 @@ fn tab_bar_render(tabs: &[TabSummary]) -> TabBarRender {
 }
 
 fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
-    let file_icon = file_icon_for_title(&tab.title);
     let mut flags = String::new();
     if tab.view_analysis {
         flags.push_str(" 👁");
@@ -1444,25 +1451,7 @@ fn tab_label(tab_number: usize, tab: &TabSummary) -> String {
         flags.push_str(" ⚠");
     }
     let pin = if tab.pinned { "📌 " } else { "" };
-    if tab.active {
-        format!("▶ {tab_number}. {pin}{file_icon} {}{flags}", tab.title)
-    } else {
-        format!("{tab_number}. {pin}{file_icon} {}{flags}", tab.title)
-    }
-}
-
-fn file_icon_for_title(title: &str) -> &'static str {
-    let extension = Path::new(title)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("csv" | "tsv") => "📊",
-        Some("json" | "jsonl" | "toml" | "yaml" | "yml" | "xml") => "⚙",
-        Some("log" | "out" | "trace" | "sql" | "dump") => "🧾",
-        Some("md" | "markdown" | "txt" | "text") => "📝",
-        _ => "📄",
-    }
+    format!("{tab_number}. {pin}{}{flags}", tab.title)
 }
 
 fn window_title(title: &str, tabs: &[TabSummary]) -> String {
@@ -1846,12 +1835,14 @@ mod tests {
         ];
 
         let render = tab_bar_render(&tabs);
-        let active_label = "▶ 2. 📝 second.txt";
+        let active_label = "2. second.txt";
         let active_start = render.text.find(active_label).unwrap();
 
-        assert!(render.text.contains("1. 📝 first.txt"));
+        assert!(render.text.contains("1. first.txt"));
         assert!(render.text.contains(active_label));
-        assert!(render.text.contains("3. 📝 third.txt"));
+        assert!(render.text.contains("3. third.txt"));
+        assert!(!render.text.contains("📄"));
+        assert!(!render.text.contains("📝"));
         assert_eq!(
             render.active_range_utf16,
             Some((
@@ -1862,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_labels_use_visible_state_icons() {
+    fn tab_labels_use_visible_state_markers_without_file_icon() {
         let mut tab = summary(1, "dump.sql", true);
         tab.view_analysis = true;
         tab.dirty = true;
@@ -1872,12 +1863,14 @@ mod tests {
 
         let label = tab_label(1, &tab);
 
+        assert!(label.starts_with("1. 📌 dump.sql"));
         assert!(label.contains("📌"));
-        assert!(label.contains("🧾"));
         assert!(label.contains("👁"));
         assert!(label.contains("*"));
         assert!(label.contains("🔒"));
         assert!(label.contains("⚠"));
+        assert!(!label.contains("📄"));
+        assert!(!label.contains("🧾"));
     }
 
     #[test]
