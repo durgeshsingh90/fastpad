@@ -2,7 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP="$("$ROOT/scripts/build_macos_app.sh")"
+
+if [[ "${FASTPAD_SKIP_BUILD:-0}" == "1" ]]; then
+  APP="$ROOT/FastPad.app"
+  if [[ ! -x "$APP/Contents/MacOS/FastPad" ]]; then
+    echo "FastPad.app is missing; run scripts/build_macos_app.sh first." >&2
+    exit 1
+  fi
+else
+  APP="$("$ROOT/scripts/build_macos_app.sh")"
+fi
 ARGS=()
 
 for arg in "$@"; do

@@ -34,6 +34,12 @@ Run tests:
 cargo test
 ```
 
+Run smoke tests against the project specification files used during development:
+
+```sh
+scripts/smoke_attached_files.sh
+```
+
 Run the macOS app directly:
 
 ```sh
@@ -77,4 +83,3 @@ scripts/run_macos_app.sh
 - Use byte offsets for large-file references.
 - Emit progressive results for long operations.
 - Every long-running operation must have a cancellation token.
-
