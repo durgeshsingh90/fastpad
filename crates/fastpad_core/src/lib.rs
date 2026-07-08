@@ -837,6 +837,23 @@ impl Document {
         }
     }
 
+    pub fn temporary_autosave_job(&self) -> Option<TemporaryAutosaveJob> {
+        match &self.backing {
+            DocumentBacking::Edit {
+                buffer,
+                path: None,
+                temp_path: Some(temp_path),
+                ..
+            } if buffer.is_dirty() => Some(TemporaryAutosaveJob {
+                document_id: self.id,
+                title: self.title.clone(),
+                temp_path: temp_path.clone(),
+                text: buffer.text(),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn search(&self, query: &SearchQuery, cancel: &CancellationToken) -> Result<SearchSummary> {
         match &self.backing {
             DocumentBacking::View { file, .. } => SearchEngine::search(file, query, cancel),
@@ -1064,6 +1081,14 @@ pub enum OpenTabRequest {
     Pending(PendingOpenDocument),
 }
 
+#[derive(Debug, Clone)]
+pub struct TemporaryAutosaveJob {
+    pub document_id: DocumentId,
+    pub title: String,
+    pub temp_path: PathBuf,
+    pub text: String,
+}
+
 pub struct DocumentManager {
     settings: AppSettings,
     next_document_id: u64,
@@ -1282,6 +1307,13 @@ impl DocumentManager {
         self.documents
             .values()
             .any(|document| document.read().is_dirty())
+    }
+
+    pub fn temporary_autosave_jobs(&self) -> Vec<TemporaryAutosaveJob> {
+        self.documents
+            .values()
+            .filter_map(|document| document.read().temporary_autosave_job())
+            .collect()
     }
 
     pub fn maintain_resource_policy(&mut self) -> CacheEvictionSummary {
@@ -1834,6 +1866,18 @@ mod tests {
         let first_temp_path = first.temporary_backing_path().unwrap().to_path_buf();
         assert!(first_temp_path.exists());
         drop(first);
+        manager
+            .get(first_doc)
+            .unwrap()
+            .write()
+            .set_edit_text("draft")
+            .unwrap();
+        let jobs = manager.temporary_autosave_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].document_id, first_doc);
+        assert_eq!(jobs[0].title, "Untitled 1");
+        assert_eq!(jobs[0].text, "draft");
+        assert_eq!(jobs[0].temp_path, first_temp_path);
         let second = manager.get(summaries[1].document_id).unwrap();
         let second = second.read();
         let second_temp_path = second.temporary_backing_path().unwrap().to_path_buf();

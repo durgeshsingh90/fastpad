@@ -11,6 +11,7 @@ use fastpad_core::{
     AppSettings, Document, DocumentManager, EditorMode, OpenIntent, OpenTabRequest, TabId,
     TabSummary,
 };
+use fastpad_file::atomic_write;
 use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
 use fastpad_tasks::{TaskHandle, TaskProgress};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
@@ -23,6 +24,7 @@ use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 const NS_MODAL_RESPONSE_OK: i64 = 1;
 const NS_ALERT_FIRST_BUTTON_RETURN: i64 = 1000;
@@ -66,6 +68,8 @@ struct AppState {
     status_field: id,
     last_presented_text: String,
     open_tasks: Vec<TaskHandle<anyhow::Result<Document>>>,
+    autosave_task: Option<TaskHandle<anyhow::Result<usize>>>,
+    last_autosave_at: Instant,
 }
 
 impl AppState {
@@ -87,6 +91,8 @@ impl AppState {
             status_field,
             last_presented_text: String::new(),
             open_tasks: Vec::new(),
+            autosave_task: None,
+            last_autosave_at: Instant::now(),
         }
     }
 
@@ -435,6 +441,60 @@ impl AppState {
         set_tab_bar(self.tab_bar, tabs);
     }
 
+    unsafe fn schedule_autosave_if_due(&mut self) {
+        if self.autosave_task.is_some() {
+            return;
+        }
+        let interval = Duration::from_secs(self.manager.settings().autosave_interval_secs.max(1));
+        if self.last_autosave_at.elapsed() < interval {
+            return;
+        }
+        self.last_autosave_at = Instant::now();
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+        let jobs = self.manager.temporary_autosave_jobs();
+        if jobs.is_empty() {
+            return;
+        }
+
+        let task = TaskHandle::spawn("Autosave".to_string(), move |token, _progress| {
+            let mut saved = 0usize;
+            for job in jobs {
+                token.throw_if_cancelled().map_err(anyhow::Error::from)?;
+                atomic_write(&job.temp_path, job.text.as_bytes())?;
+                saved += 1;
+            }
+            Ok(saved)
+        });
+        self.autosave_task = Some(task);
+    }
+
+    unsafe fn poll_autosave_task(&mut self) {
+        let Some(task) = self.autosave_task.as_ref() else {
+            return;
+        };
+        if !task.is_finished() {
+            return;
+        }
+        let task = self.autosave_task.take().expect("autosave task exists");
+        match task.join() {
+            Ok(Ok(saved)) if saved > 0 => {
+                set_status(
+                    self.status_field,
+                    &format!("Autosaved {saved} unsaved tab(s)."),
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                set_status(self.status_field, &format!("Autosave failed: {error:#}"));
+            }
+            Err(error) => {
+                set_status(self.status_field, &format!("Autosave task failed: {error}"));
+            }
+        }
+    }
+
     unsafe fn poll_background_tasks(&mut self) {
         let mut index = 0usize;
         while index < self.open_tasks.len() {
@@ -463,6 +523,8 @@ impl AppState {
         }
 
         let _ = self.manager.maintain_resource_policy();
+        self.poll_autosave_task();
+        self.schedule_autosave_if_due();
     }
 
     unsafe fn save_copy_as(&mut self) -> bool {
