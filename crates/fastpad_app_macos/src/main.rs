@@ -93,6 +93,9 @@ impl AppState {
     unsafe fn present_text(&mut self, text: String, editable: bool) {
         set_scroll_document_view(self.scroll_view, self.text_view);
         set_text_view(self.text_view, &text, editable);
+        if editable {
+            let _: () = msg_send![self.window, makeFirstResponder: self.text_view];
+        }
         self.last_presented_text = text;
     }
 
@@ -563,16 +566,7 @@ fn main() {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         if paths.is_empty() {
-            set_text_view(
-                text_view,
-                "FastPad\n\nUse File > Open... to inspect a text file.",
-                false,
-            );
-            set_status(
-                status_field,
-                "No document open - View/Analysis Mode opens huge files read-only",
-            );
-            set_tab_bar(tab_bar, &[]);
+            (*state).new_document();
         } else {
             (*state).open_paths(paths);
         }
