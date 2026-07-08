@@ -148,8 +148,10 @@ impl AppState {
     }
 
     unsafe fn new_document(&mut self) {
-        self.manager.new_untitled_tab();
-        self.render_active_tab();
+        match self.manager.new_untitled_tab() {
+            Ok(_) => self.render_active_tab(),
+            Err(error) => self.show_error(&format!("New document failed: {error:#}")),
+        }
     }
 
     unsafe fn render_active_tab(&mut self) {

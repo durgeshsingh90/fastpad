@@ -7,7 +7,10 @@ use fastpad_viewport::{ViewAnchor, Viewport, ViewportEngine, ViewportRequest};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +23,7 @@ pub const DEFAULT_MAX_EDIT_LOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_HUGE_LINE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_TAB_HIBERNATION_AFTER_SECS: u64 = 15 * 60;
 pub const DEFAULT_SESSION_RESTORE_NEIGHBOR_TABS: usize = 1;
+pub const DEFAULT_AUTOSAVE_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorMode {
@@ -53,6 +57,7 @@ pub struct AppSettings {
     pub initial_viewport_bytes: usize,
     pub tab_hibernation_after_secs: u64,
     pub session_restore_neighbor_tabs: usize,
+    pub autosave_interval_secs: u64,
 }
 
 impl Default for AppSettings {
@@ -69,6 +74,7 @@ impl Default for AppSettings {
             initial_viewport_bytes: 512 * 1024,
             tab_hibernation_after_secs: DEFAULT_TAB_HIBERNATION_AFTER_SECS,
             session_restore_neighbor_tabs: DEFAULT_SESSION_RESTORE_NEIGHBOR_TABS,
+            autosave_interval_secs: DEFAULT_AUTOSAVE_INTERVAL_SECS,
         }
     }
 }
@@ -527,6 +533,7 @@ pub enum DocumentBacking {
     Edit {
         buffer: EditBuffer,
         path: Option<PathBuf>,
+        temp_path: Option<PathBuf>,
         metadata: Option<FileMetadata>,
     },
 }
@@ -543,10 +550,11 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn untitled(id: DocumentId) -> Self {
-        Self {
+    pub fn untitled(id: DocumentId, title: impl Into<String>) -> Result<Self> {
+        let temp_path = create_temporary_backing_file(id)?;
+        Ok(Self {
             id,
-            title: "Untitled".into(),
+            title: title.into(),
             mode: EditorMode::Edit,
             internal_engine: InternalEngineProfile::NormalEdit,
             mode_reason: "new document".into(),
@@ -555,9 +563,10 @@ impl Document {
             backing: DocumentBacking::Edit {
                 buffer: EditBuffer::new(),
                 path: None,
+                temp_path: Some(temp_path),
                 metadata: None,
             },
-        }
+        })
     }
 
     pub fn open(
@@ -609,6 +618,7 @@ impl Document {
                     backing: DocumentBacking::Edit {
                         buffer: EditBuffer::from_text(&text),
                         path: Some(file.path().to_path_buf()),
+                        temp_path: None,
                         metadata: Some(metadata),
                     },
                 })
@@ -714,6 +724,13 @@ impl Document {
         }
     }
 
+    pub fn temporary_backing_path(&self) -> Option<&Path> {
+        match &self.backing {
+            DocumentBacking::Edit { temp_path, .. } => temp_path.as_deref(),
+            DocumentBacking::View { .. } => None,
+        }
+    }
+
     pub fn metadata(&self) -> Option<&FileMetadata> {
         match &self.backing {
             DocumentBacking::View { file, .. } => Some(file.metadata()),
@@ -798,6 +815,28 @@ impl Document {
         )
     }
 
+    pub fn is_unsaved_edit_document(&self) -> bool {
+        matches!(&self.backing, DocumentBacking::Edit { path: None, .. })
+    }
+
+    pub fn autosave_temporary_backing(&self) -> Result<bool> {
+        match &self.backing {
+            DocumentBacking::Edit {
+                buffer,
+                path: None,
+                temp_path: Some(temp_path),
+                ..
+            } => {
+                atomic_write(temp_path, buffer.text().as_bytes())?;
+                Ok(true)
+            }
+            DocumentBacking::Edit { path: None, .. } => {
+                bail!("unsaved document has no temporary backing file")
+            }
+            DocumentBacking::Edit { path: Some(_), .. } | DocumentBacking::View { .. } => Ok(false),
+        }
+    }
+
     pub fn search(&self, query: &SearchQuery, cancel: &CancellationToken) -> Result<SearchSummary> {
         match &self.backing {
             DocumentBacking::View { file, .. } => SearchEngine::search(file, query, cancel),
@@ -828,6 +867,7 @@ impl Document {
             DocumentBacking::Edit {
                 buffer,
                 path: doc_path,
+                temp_path,
                 metadata,
             } => {
                 let path = path.as_ref().to_path_buf();
@@ -835,6 +875,9 @@ impl Document {
                 let file = FileHandle::open(&path, FileOpenOptions::default())?;
                 *doc_path = Some(path.clone());
                 *metadata = Some(file.metadata().clone());
+                if let Some(old_temp_path) = temp_path.take() {
+                    remove_temporary_backing_file(&old_temp_path)?;
+                }
                 self.title = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -1026,6 +1069,7 @@ pub struct DocumentManager {
     next_document_id: u64,
     next_tab_id: u64,
     next_view_id: u64,
+    next_untitled_index: u64,
     documents: BTreeMap<DocumentId, Arc<RwLock<Document>>>,
     tabs: BTreeMap<TabId, Tab>,
     path_index: BTreeMap<PathBuf, DocumentId>,
@@ -1050,6 +1094,7 @@ impl DocumentManager {
             next_document_id: 1,
             next_tab_id: 1,
             next_view_id: 1,
+            next_untitled_index: 1,
             documents: BTreeMap::new(),
             tabs: BTreeMap::new(),
             path_index: BTreeMap::new(),
@@ -1120,19 +1165,21 @@ impl DocumentManager {
         self.create_tab_for_document(document_id)
     }
 
-    pub fn new_untitled(&mut self) -> DocumentId {
-        let tab_id = self.new_untitled_tab();
-        self.tabs
+    pub fn new_untitled(&mut self) -> Result<DocumentId> {
+        let tab_id = self.new_untitled_tab()?;
+        Ok(self
+            .tabs
             .get(&tab_id)
             .expect("newly created tab exists")
-            .document_id
+            .document_id)
     }
 
-    pub fn new_untitled_tab(&mut self) -> TabId {
+    pub fn new_untitled_tab(&mut self) -> Result<TabId> {
         let id = self.allocate_document_id();
-        let doc = Document::untitled(id);
+        let title = self.allocate_untitled_title();
+        let doc = Document::untitled(id, title)?;
         self.documents.insert(id, Arc::new(RwLock::new(doc)));
-        self.create_tab_for_document(id)
+        Ok(self.create_tab_for_document(id))
     }
 
     pub fn duplicate_active_tab(&mut self) -> Option<TabId> {
@@ -1448,16 +1495,71 @@ impl DocumentManager {
         self.next_view_id += 1;
         id
     }
+
+    fn allocate_untitled_title(&mut self) -> String {
+        let index = self.next_untitled_index;
+        self.next_untitled_index += 1;
+        format!("Untitled {index}")
+    }
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+pub fn temporary_session_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("FastPad")
+            .join("Session");
+    }
+
+    std::env::temp_dir().join("FastPad").join("Session")
+}
+
+fn create_temporary_backing_file(id: DocumentId) -> Result<PathBuf> {
+    let dir = temporary_session_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    for attempt in 0..100u32 {
+        let path = dir.join(format!(
+            "{:x}-{}-{}-{attempt}.tmp",
+            current_unix_nanos(),
+            process::id(),
+            id.0
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create {}", path.display()));
+            }
+        }
+    }
+    bail!("could not allocate unique temporary backing file")
+}
+
+fn remove_temporary_backing_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn current_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0)
 }
 
@@ -1690,16 +1792,54 @@ mod tests {
 
     #[test]
     fn save_as_updates_path_and_marks_clean() {
-        let mut doc = Document::untitled(DocumentId(1));
+        let mut doc = Document::untitled(DocumentId(1), "Untitled 1").unwrap();
+        let temp_path = doc.temporary_backing_path().unwrap().to_path_buf();
+        assert!(temp_path.exists());
+
         doc.set_edit_text("hello").unwrap();
         assert!(doc.is_dirty());
+        assert!(doc.autosave_temporary_backing().unwrap());
+        assert_eq!(std::fs::read_to_string(&temp_path).unwrap(), "hello");
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         doc.save_as(tmp.path()).unwrap();
 
         assert!(!doc.is_dirty());
         assert!(doc.has_save_path());
+        assert!(doc.temporary_backing_path().is_none());
+        assert!(!temp_path.exists());
         assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "hello");
+    }
+
+    #[test]
+    fn new_untitled_documents_are_numbered_and_temp_backed() {
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let first_tab = manager.new_untitled_tab().unwrap();
+        let second_tab = manager.new_untitled_tab().unwrap();
+
+        let summaries = manager.tab_summaries();
+        assert_eq!(summaries[0].title, "Untitled 1");
+        assert_eq!(summaries[1].title, "Untitled 2");
+        assert_eq!(manager.active_tab_id(), Some(second_tab));
+
+        let first_doc = summaries
+            .iter()
+            .find(|summary| summary.id == first_tab)
+            .unwrap()
+            .document_id;
+        let first = manager.get(first_doc).unwrap();
+        let first = first.read();
+        assert!(first.is_unsaved_edit_document());
+        let first_temp_path = first.temporary_backing_path().unwrap().to_path_buf();
+        assert!(first_temp_path.exists());
+        drop(first);
+        let second = manager.get(summaries[1].document_id).unwrap();
+        let second = second.read();
+        let second_temp_path = second.temporary_backing_path().unwrap().to_path_buf();
+        drop(second);
+        let _ = std::fs::remove_file(first_temp_path);
+        let _ = std::fs::remove_file(second_temp_path);
     }
 
     #[test]
