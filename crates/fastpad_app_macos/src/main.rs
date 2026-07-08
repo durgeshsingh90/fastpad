@@ -8,8 +8,8 @@ use cocoa::appkit::{
 use cocoa::base::{id, nil, BOOL, NO, YES};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use fastpad_core::{
-    AppSettings, Document, DocumentManager, EditorMode, OpenIntent, OpenTabRequest, TabId,
-    TabSummary,
+    write_recovery_session_manifest, AppSettings, Document, DocumentManager, EditorMode,
+    OpenIntent, OpenTabRequest, TabId, TabSummary,
 };
 use fastpad_file::atomic_write;
 use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
@@ -157,6 +157,25 @@ impl AppState {
         match self.manager.new_untitled_tab() {
             Ok(_) => self.render_active_tab(),
             Err(error) => self.show_error(&format!("New document failed: {error:#}")),
+        }
+    }
+
+    unsafe fn restore_recovery_or_new_document(&mut self) {
+        match self.manager.restore_recovery_session() {
+            Ok(0) => self.new_document(),
+            Ok(restored) => {
+                self.render_active_tab();
+                set_status(
+                    self.status_field,
+                    &format!("Recovered {restored} unsaved tab(s)."),
+                );
+            }
+            Err(error) => {
+                self.show_error(&format!("Recovery failed: {error:#}"));
+                if self.manager.active().is_none() {
+                    self.new_document();
+                }
+            }
         }
     }
 
@@ -454,6 +473,7 @@ impl AppState {
             return;
         }
         let jobs = self.manager.temporary_autosave_jobs();
+        let manifest = self.manager.recovery_session_manifest();
         if jobs.is_empty() {
             return;
         }
@@ -465,6 +485,7 @@ impl AppState {
                 atomic_write(&job.temp_path, job.text.as_bytes())?;
                 saved += 1;
             }
+            write_recovery_session_manifest(&manifest)?;
             Ok(saved)
         });
         self.autosave_task = Some(task);
@@ -560,8 +581,18 @@ impl AppState {
         }
     }
 
+    unsafe fn discard_unsaved_recovery_data(&mut self) {
+        if let Err(error) = self.manager.discard_unsaved_temporary_backings() {
+            set_status(
+                self.status_field,
+                &format!("Recovery cleanup failed: {error:#}"),
+            );
+        }
+    }
+
     unsafe fn confirm_terminate(&mut self) -> bool {
         if !self.active_document_has_unsaved_changes() {
+            self.discard_unsaved_recovery_data();
             return true;
         }
 
@@ -577,9 +608,22 @@ impl AppState {
         let response: i64 = msg_send![alert, runModal];
 
         match response {
-            NS_ALERT_FIRST_BUTTON_RETURN => self.save_active(),
+            NS_ALERT_FIRST_BUTTON_RETURN => {
+                if !self.save_active() {
+                    return false;
+                }
+                if self.manager.has_dirty_documents() {
+                    self.show_error("Save remaining modified tabs before quitting.");
+                    return false;
+                }
+                self.discard_unsaved_recovery_data();
+                true
+            }
             NS_ALERT_SECOND_BUTTON_RETURN => false,
-            NS_ALERT_THIRD_BUTTON_RETURN => true,
+            NS_ALERT_THIRD_BUTTON_RETURN => {
+                self.discard_unsaved_recovery_data();
+                true
+            }
             _ => false,
         }
     }
@@ -630,7 +674,7 @@ fn main() {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         if paths.is_empty() {
-            (*state).new_document();
+            (*state).restore_recovery_or_new_document();
         } else {
             (*state).open_paths(paths);
         }

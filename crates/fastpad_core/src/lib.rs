@@ -569,6 +569,38 @@ impl Document {
         })
     }
 
+    pub fn recovered_untitled(
+        id: DocumentId,
+        title: impl Into<String>,
+        temp_path: impl Into<PathBuf>,
+        text: &str,
+    ) -> Result<Self> {
+        let temp_path = temp_path.into();
+        if !temp_path.exists() {
+            bail!(
+                "recovery backing file does not exist: {}",
+                temp_path.display()
+            );
+        }
+        let mut buffer = EditBuffer::from_text(text);
+        buffer.mark_dirty();
+        Ok(Self {
+            id,
+            title: title.into(),
+            mode: EditorMode::Edit,
+            internal_engine: InternalEngineProfile::NormalEdit,
+            mode_reason: "recovered unsaved document".into(),
+            user_notice: None,
+            resource_state: DocumentResourceState::active(current_unix_secs()),
+            backing: DocumentBacking::Edit {
+                buffer,
+                path: None,
+                temp_path: Some(temp_path),
+                metadata: None,
+            },
+        })
+    }
+
     pub fn open(
         id: DocumentId,
         path: impl AsRef<Path>,
@@ -854,6 +886,23 @@ impl Document {
         }
     }
 
+    pub fn discard_temporary_backing(&mut self) -> Result<bool> {
+        match &mut self.backing {
+            DocumentBacking::Edit {
+                path: None,
+                temp_path,
+                ..
+            } => {
+                let Some(temp_path) = temp_path.take() else {
+                    return Ok(false);
+                };
+                remove_temporary_backing_file(&temp_path)?;
+                Ok(true)
+            }
+            DocumentBacking::Edit { path: Some(_), .. } | DocumentBacking::View { .. } => Ok(false),
+        }
+    }
+
     pub fn search(&self, query: &SearchQuery, cancel: &CancellationToken) -> Result<SearchSummary> {
         match &self.backing {
             DocumentBacking::View { file, .. } => SearchEngine::search(file, query, cancel),
@@ -1089,6 +1138,25 @@ pub struct TemporaryAutosaveJob {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryDocumentEntry {
+    pub title: String,
+    pub temp_path: PathBuf,
+    pub view: DocumentViewState,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecoverySessionManifest {
+    pub documents: Vec<RecoveryDocumentEntry>,
+    pub active_tab_index: Option<usize>,
+}
+
+impl RecoverySessionManifest {
+    pub fn is_empty(&self) -> bool {
+        self.documents.is_empty()
+    }
+}
+
 pub struct DocumentManager {
     settings: AppSettings,
     next_document_id: u64,
@@ -1316,6 +1384,92 @@ impl DocumentManager {
             .collect()
     }
 
+    pub fn recovery_session_manifest(&self) -> RecoverySessionManifest {
+        let active_tab_id = self.active_tab_id();
+        let Some(window) = self.windows.get(&self.active_window) else {
+            return RecoverySessionManifest::default();
+        };
+        let mut manifest = RecoverySessionManifest::default();
+        for tab_id in &window.tabs {
+            let Some(tab) = self.tabs.get(tab_id) else {
+                continue;
+            };
+            let Some(document) = self.documents.get(&tab.document_id) else {
+                continue;
+            };
+            let document = document.read();
+            if !document.is_unsaved_edit_document() || !document.is_dirty() {
+                continue;
+            }
+            let Some(temp_path) = document.temporary_backing_path() else {
+                continue;
+            };
+            if active_tab_id == Some(*tab_id) {
+                manifest.active_tab_index = Some(manifest.documents.len());
+            }
+            manifest.documents.push(RecoveryDocumentEntry {
+                title: document.title().to_string(),
+                temp_path: temp_path.to_path_buf(),
+                view: tab.view.clone(),
+            });
+        }
+        manifest
+    }
+
+    pub fn restore_recovery_session(&mut self) -> Result<usize> {
+        let Some(manifest) = read_recovery_session_manifest()? else {
+            return Ok(0);
+        };
+        self.restore_recovery_session_manifest(manifest)
+    }
+
+    pub fn restore_recovery_session_manifest(
+        &mut self,
+        manifest: RecoverySessionManifest,
+    ) -> Result<usize> {
+        let mut restored_tabs = Vec::new();
+        for entry in manifest.documents {
+            let text = match fs::read_to_string(&entry.temp_path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("read {}", entry.temp_path.display()));
+                }
+            };
+            let id = self.allocate_document_id();
+            self.note_untitled_title(&entry.title);
+            let document = Document::recovered_untitled(id, entry.title, entry.temp_path, &text)?;
+            self.documents.insert(id, Arc::new(RwLock::new(document)));
+            let tab_id = self.create_tab_for_document(id);
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.view = entry.view;
+            }
+            restored_tabs.push(tab_id);
+        }
+
+        if let Some(active_tab) = manifest
+            .active_tab_index
+            .and_then(|index| restored_tabs.get(index).copied())
+            .or_else(|| restored_tabs.first().copied())
+        {
+            let _ = self.set_active_tab(active_tab);
+        }
+
+        Ok(restored_tabs.len())
+    }
+
+    pub fn discard_unsaved_temporary_backings(&mut self) -> Result<usize> {
+        let mut discarded = 0usize;
+        for document in self.documents.values() {
+            if document.write().discard_temporary_backing()? {
+                discarded += 1;
+            }
+        }
+        clear_recovery_session_manifest()?;
+        Ok(discarded)
+    }
+
     pub fn maintain_resource_policy(&mut self) -> CacheEvictionSummary {
         self.maintain_resource_policy_with_system(
             SystemMemoryStatus::current(),
@@ -1533,6 +1687,16 @@ impl DocumentManager {
         self.next_untitled_index += 1;
         format!("Untitled {index}")
     }
+
+    fn note_untitled_title(&mut self, title: &str) {
+        let Some(index) = title
+            .strip_prefix("Untitled ")
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return;
+        };
+        self.next_untitled_index = self.next_untitled_index.max(index.saturating_add(1));
+    }
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
@@ -1550,6 +1714,43 @@ pub fn temporary_session_dir() -> PathBuf {
     }
 
     std::env::temp_dir().join("FastPad").join("Session")
+}
+
+pub fn recovery_manifest_path() -> PathBuf {
+    temporary_session_dir().join("recovery.json")
+}
+
+pub fn read_recovery_session_manifest() -> Result<Option<RecoverySessionManifest>> {
+    let path = recovery_manifest_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let manifest =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+pub fn write_recovery_session_manifest(manifest: &RecoverySessionManifest) -> Result<()> {
+    if manifest.is_empty() {
+        return clear_recovery_session_manifest();
+    }
+    let dir = temporary_session_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = recovery_manifest_path();
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .with_context(|| format!("serialize {}", path.display()))?;
+    atomic_write(path, &bytes)
+}
+
+pub fn clear_recovery_session_manifest() -> Result<()> {
+    let path = recovery_manifest_path();
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 fn create_temporary_backing_file(id: DocumentId) -> Result<PathBuf> {
@@ -1884,6 +2085,89 @@ mod tests {
         drop(second);
         let _ = std::fs::remove_file(first_temp_path);
         let _ = std::fs::remove_file(second_temp_path);
+    }
+
+    #[test]
+    fn recovery_session_restores_dirty_unsaved_tabs() {
+        let mut manager = DocumentManager::new(AppSettings::default());
+
+        let first_tab = manager.new_untitled_tab().unwrap();
+        let second_tab = manager.new_untitled_tab().unwrap();
+        let first_doc = manager
+            .tab_summaries()
+            .iter()
+            .find(|summary| summary.id == first_tab)
+            .unwrap()
+            .document_id;
+        let second_doc = manager
+            .tab_summaries()
+            .iter()
+            .find(|summary| summary.id == second_tab)
+            .unwrap()
+            .document_id;
+
+        manager
+            .get(first_doc)
+            .unwrap()
+            .write()
+            .set_edit_text("first draft")
+            .unwrap();
+        manager
+            .get(second_doc)
+            .unwrap()
+            .write()
+            .set_edit_text("second draft")
+            .unwrap();
+        for document_id in [first_doc, second_doc] {
+            manager
+                .get(document_id)
+                .unwrap()
+                .read()
+                .autosave_temporary_backing()
+                .unwrap();
+        }
+
+        let manifest = manager.recovery_session_manifest();
+        assert_eq!(manifest.documents.len(), 2);
+        assert_eq!(manifest.active_tab_index, Some(1));
+
+        let mut restored = DocumentManager::new(AppSettings::default());
+        assert_eq!(
+            restored
+                .restore_recovery_session_manifest(manifest.clone())
+                .unwrap(),
+            2
+        );
+        let summaries = restored.tab_summaries();
+        assert_eq!(summaries[0].title, "Untitled 1");
+        assert_eq!(summaries[1].title, "Untitled 2");
+        assert!(summaries[0].dirty);
+        assert!(summaries[1].dirty);
+        assert_eq!(restored.active_tab_id(), Some(summaries[1].id));
+        assert_eq!(
+            restored
+                .get(summaries[0].document_id)
+                .unwrap()
+                .read()
+                .full_text_for_editing()
+                .unwrap(),
+            "first draft"
+        );
+        assert_eq!(
+            restored
+                .get(summaries[1].document_id)
+                .unwrap()
+                .read()
+                .full_text_for_editing()
+                .unwrap(),
+            "second draft"
+        );
+
+        restored.discard_unsaved_temporary_backings().unwrap();
+        manager.discard_unsaved_temporary_backings().unwrap();
+        for entry in manifest.documents {
+            assert!(!entry.temp_path.exists());
+        }
     }
 
     #[test]

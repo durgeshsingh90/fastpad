@@ -200,6 +200,10 @@ impl EditBuffer {
         self.dirty = false;
     }
 
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn trim_trailing_whitespace(&mut self) -> Result<()> {
         let text = self.text();
         let mut edits = Vec::new();
