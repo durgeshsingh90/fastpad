@@ -55,6 +55,17 @@ pub struct PipelineResult {
     pub cancelled: bool,
 }
 
+#[derive(Debug)]
+pub struct PipelineProgress<'a> {
+    pub preview: &'a [String],
+    pub processed_lines: u64,
+    pub emitted_lines: u64,
+    pub hidden_lines: u64,
+    pub bytes_scanned: u64,
+    pub total_bytes: u64,
+    pub cancelled: bool,
+}
+
 pub struct PipelineEngine;
 
 impl PipelineEngine {
@@ -63,6 +74,16 @@ impl PipelineEngine {
         pipeline: &Pipeline,
         options: &PipelineOptions,
         cancel: &CancellationToken,
+    ) -> Result<PipelineResult> {
+        Self::run_with_progress(file, pipeline, options, cancel, |_| {})
+    }
+
+    pub fn run_with_progress(
+        file: &FileHandle,
+        pipeline: &Pipeline,
+        options: &PipelineOptions,
+        cancel: &CancellationToken,
+        mut on_progress: impl FnMut(PipelineProgress<'_>),
     ) -> Result<PipelineResult> {
         let mut compiled = CompiledPipeline::compile(pipeline)?;
         let mut preview = Vec::new();
@@ -109,6 +130,16 @@ impl PipelineEngine {
             if compiled.should_stop(emitted_lines as usize) {
                 break;
             }
+
+            on_progress(PipelineProgress {
+                preview: &preview,
+                processed_lines,
+                emitted_lines,
+                hidden_lines,
+                bytes_scanned: bytes_scanned.min(file_len),
+                total_bytes: file_len,
+                cancelled: cancel.is_cancelled(),
+            });
         }
 
         if !carry.is_empty()
@@ -314,5 +345,44 @@ mod tests {
 
         assert_eq!(result.preview, vec!["bad", "worse"]);
         assert_eq!(result.emitted_lines, 2);
+    }
+
+    #[test]
+    fn run_with_progress_reports_preview_and_counts() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "INFO ok\nERROR bad\nERROR worse\n").unwrap();
+        let file = FileHandle::open(tmp.path(), FileOpenOptions::default()).unwrap();
+        let pipeline = Pipeline {
+            stages: vec![PipelineStage::Contains {
+                needle: "ERROR".into(),
+                case_sensitive: true,
+                invert: false,
+            }],
+        };
+        let options = PipelineOptions {
+            chunk_size: 8,
+            preview_limit: 10,
+        };
+        let mut snapshots = Vec::new();
+
+        let result = PipelineEngine::run_with_progress(
+            &file,
+            &pipeline,
+            &options,
+            &CancellationToken::new(),
+            |progress| {
+                snapshots.push((
+                    progress.bytes_scanned,
+                    progress.emitted_lines,
+                    progress.preview.len(),
+                ));
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.emitted_lines, 2);
+        assert!(!snapshots.is_empty());
+        assert_eq!(snapshots.last().unwrap().1, 2);
+        assert_eq!(snapshots.last().unwrap().2, 2);
     }
 }

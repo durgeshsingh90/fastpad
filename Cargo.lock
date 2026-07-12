@@ -143,13 +143,36 @@ dependencies = [
  "anyhow",
  "cocoa",
  "core-graphics",
+ "crossbeam-channel",
  "fastpad_core",
  "fastpad_file",
+ "fastpad_line_index",
+ "fastpad_pipeline",
  "fastpad_render",
+ "fastpad_search",
+ "fastpad_tail",
  "fastpad_tasks",
  "fastpad_viewport",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "fastpad_benchmarks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fastpad_core",
+ "fastpad_diagnostics",
+ "fastpad_edit",
+ "fastpad_file",
+ "fastpad_render",
+ "fastpad_search",
+ "fastpad_tasks",
+ "fastpad_viewport",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

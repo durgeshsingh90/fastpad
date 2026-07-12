@@ -40,11 +40,19 @@ FastPad treats tabs as lightweight views over shared documents:
 
 `fastpad_viewport::ViewportEngine` returns visible `LineSlice` values plus byte anchors. The native shell currently displays one viewport at a time and exposes `Page Down` for read-only paging.
 
+For View/Analysis documents, the AppKit shell starts one bounded background line-index warmup task at a time. The worker builds from a `LineIndexSnapshot`, emits progress through `TaskProgress`, and applies the finished snapshot back to the document manager; search/filter/tail tasks preempt that warmup so interactive analysis stays responsive.
+
 ## Search and Pipelines
 
 `fastpad_search` scans chunks with overlap so literal matches crossing chunk boundaries are preserved. Results are bounded by `max_results`, while `matches_seen` continues counting all matches discovered before cancellation.
 
 `fastpad_pipeline` streams lines through composable non-destructive stages. Preview output is bounded, and the source file remains untouched.
+
+The native Search menu exposes current-document search, contains-filter preview, tail follow, and cancellation through a bottom analysis results pane. File-backed search and filter jobs run on background `TaskHandle`s and push progressive preview text through progress updates; tail follow polls appended byte ranges into the same pane.
+
+## Benchmarks
+
+`fastpad_benchmarks` provides a repeatable JSON benchmark harness for core startup, document open, first viewport/render, full literal search, peak RSS deltas, and edit typing latency. The default fixture is intentionally small for local iteration, while `scripts/run_benchmarks.sh` accepts larger fixture sizes such as `BYTES=1G` and `BYTES=10G` for large-file runs on suitable machines.
 
 ## Editing
 
@@ -58,7 +66,8 @@ The current shell presents a single primary window with a lightweight tab strip.
 
 ## Current MVP Limits
 
-- The AppKit shell uses `NSTextView` as the initial UI surface. View/Analysis Mode pages through bounded viewports instead of implementing a custom virtual renderer.
+- Edit Mode still uses `NSTextView`; View/Analysis Mode uses a custom AppKit virtual view backed by bounded render plans.
 - `LargeOptimizedEdit` and `StreamingEdit` are selected by the core decision model, but the first AppKit edit surface still requires a bounded full-text load. Files beyond the current bounded edit load are routed to `ViewAnalysis` until a true virtual edit engine is implemented.
-- Search and pipeline engines are available in core crates, but the first AppKit shell does not yet expose full search/filter panels.
+- Current-document search/filter/tail panels exist, but workspace search, saved filters, result navigation, export flows, and richer task diagnostics are future work.
 - Drag-and-drop tab reordering, split views, multiple windows, recently closed tabs, session restore, syntax highlighting, block selection, bookmarks, and performance dashboards are future work.
+- Benchmark dashboards and CI regression gates are future work.

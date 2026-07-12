@@ -13,6 +13,7 @@ members = [
     "crates/fastpad_replace",
     "crates/fastpad_tasks",
     "crates/fastpad_diagnostics",
+    "crates/fastpad_benchmarks",
 ]
 resolver = "2"
 

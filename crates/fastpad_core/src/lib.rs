@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use fastpad_edit::EditBuffer;
 use fastpad_file::{atomic_write, FileHandle, FileKind, FileMetadata, FileOpenOptions};
+use fastpad_line_index::{LineIndexSnapshot, LineIndexStats};
 use fastpad_search::{SearchEngine, SearchQuery, SearchSummary};
 use fastpad_tasks::CancellationToken;
 use fastpad_viewport::{ViewAnchor, Viewport, ViewportEngine, ViewportRequest};
@@ -785,6 +786,35 @@ impl Document {
         })
     }
 
+    pub fn line_index_stats(&self) -> Option<LineIndexStats> {
+        match &self.backing {
+            DocumentBacking::View { viewport, .. } => Some(viewport.line_index_stats()),
+            DocumentBacking::Edit { .. } => None,
+        }
+    }
+
+    pub fn line_index_snapshot(&self) -> Option<LineIndexSnapshot> {
+        match &self.backing {
+            DocumentBacking::View { viewport, .. } => Some(viewport.line_index_snapshot()),
+            DocumentBacking::Edit { .. } => None,
+        }
+    }
+
+    pub fn apply_line_index_snapshot(
+        &mut self,
+        snapshot: LineIndexSnapshot,
+    ) -> Option<LineIndexStats> {
+        match &mut self.backing {
+            DocumentBacking::View { viewport, .. } => {
+                let stats = viewport.replace_line_index_snapshot(snapshot);
+                self.resource_state.line_cache_resident = true;
+                self.resource_state.background_indexing_suspended = false;
+                Some(stats)
+            }
+            DocumentBacking::Edit { .. } => None,
+        }
+    }
+
     pub fn viewport(&mut self, request: ViewportRequest) -> Result<Viewport> {
         let viewport = match &mut self.backing {
             DocumentBacking::View { file, viewport } => viewport.render(file, request),
@@ -1313,6 +1343,16 @@ impl DocumentManager {
         self.documents
             .get(&id)
             .map(|document| document.read().resource_state())
+    }
+
+    pub fn apply_line_index_snapshot(
+        &mut self,
+        id: DocumentId,
+        snapshot: LineIndexSnapshot,
+    ) -> Option<LineIndexStats> {
+        self.documents
+            .get(&id)
+            .and_then(|document| document.write().apply_line_index_snapshot(snapshot))
     }
 
     pub fn update_active_view_state(
@@ -2079,12 +2119,15 @@ mod tests {
         assert_eq!(jobs[0].title, "Untitled 1");
         assert_eq!(jobs[0].text, "draft");
         assert_eq!(jobs[0].temp_path, first_temp_path);
-        let second = manager.get(summaries[1].document_id).unwrap();
-        let second = second.read();
-        let second_temp_path = second.temporary_backing_path().unwrap().to_path_buf();
-        drop(second);
+        let second = manager
+            .get(summaries[1].document_id)
+            .unwrap()
+            .read()
+            .temporary_backing_path()
+            .unwrap()
+            .to_path_buf();
         let _ = std::fs::remove_file(first_temp_path);
-        let _ = std::fs::remove_file(second_temp_path);
+        let _ = std::fs::remove_file(second);
     }
 
     #[test]
@@ -2183,6 +2226,36 @@ mod tests {
         assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.document_count(), 1);
         assert_eq!(manager.active_tab_id(), Some(first_tab));
+    }
+
+    #[test]
+    fn applies_background_line_index_snapshot_to_document() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "a\nb\nc\nd").unwrap();
+        let mut manager = DocumentManager::new(AppSettings::default());
+        let doc_id = manager
+            .open(
+                tmp.path(),
+                OpenIntent {
+                    force_analysis: true,
+                    force_edit: false,
+                },
+            )
+            .unwrap();
+        let handle = manager.get(doc_id).unwrap();
+        let mut background_index = fastpad_line_index::LazyLineIndex::new(4);
+        let file = fastpad_file::FileHandle::open(tmp.path(), FileOpenOptions::default()).unwrap();
+        background_index
+            .scan_to_offset(&file, fastpad_file::ByteOffset(file.current_len().unwrap()))
+            .unwrap();
+
+        let stats = manager
+            .apply_line_index_snapshot(doc_id, background_index.snapshot())
+            .unwrap();
+
+        assert!(stats.complete);
+        assert!(stats.contiguous_offsets >= 4);
+        assert!(handle.read().resource_state().line_cache_resident);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use fastpad_file::{ByteOffset, FileHandle};
-use fastpad_line_index::{LazyLineIndex, LineSlice};
+use fastpad_line_index::{LazyLineIndex, LineIndexSnapshot, LineIndexStats, LineSlice};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -75,6 +75,19 @@ impl ViewportEngine {
 
     pub fn index_mut(&mut self) -> &mut LazyLineIndex {
         &mut self.index
+    }
+
+    pub fn line_index_stats(&self) -> LineIndexStats {
+        self.index.stats()
+    }
+
+    pub fn line_index_snapshot(&self) -> LineIndexSnapshot {
+        self.index.snapshot()
+    }
+
+    pub fn replace_line_index_snapshot(&mut self, snapshot: LineIndexSnapshot) -> LineIndexStats {
+        self.index.replace_with_snapshot(snapshot);
+        self.index.stats()
     }
 
     pub fn render(&mut self, file: &FileHandle, request: ViewportRequest) -> Result<Viewport> {

@@ -46,13 +46,16 @@ Current implemented components:
 | View/Analysis mode foundation | Auto mode decision, read-only text view, viewport paging |
 | Adaptive engine selection foundation | Internal engine profiles selected from size, sampled line stats, file kind, encoding/binary detection, user intent, and macOS memory pressure while exposing only View/Analysis and Edit modes |
 | Lazy line index | `fastpad_line_index::LazyLineIndex` |
+| Background indexing/task throttling foundation | `LineIndexSnapshot`/progress callbacks plus AppKit background index warmup tasks apply bounded line-index snapshots back to documents while search/filter/tail preempt indexing |
 | Viewport engine | `fastpad_viewport::ViewportEngine` |
 | Custom virtual renderer foundation | `fastpad_render` overscan render plans, line-number gutter data, horizontal long-line clipping, layout cache keys, and AppKit View/Analysis virtual view |
 | Async open task integration | `DocumentManager::begin_open_tab`/`finish_open_tab`, `TaskHandle::is_finished`, and AppKit timer polling keep file open, metadata inspection, mmap setup, mode selection, and edit-buffer load off the UI thread |
-| Search core | `fastpad_search` literal/regex chunk scanning with cancellation checks |
+| Benchmark suite foundation | `crates/fastpad_benchmarks` and `scripts/run_benchmarks.sh` measure core startup, document open, first viewport/render, literal search, peak RSS deltas, and edit typing latency with configurable fixture sizes including 1GB/10GB |
+| Search/filter/tail UI foundation | Native Search menu actions, bottom analysis results pane, background search/filter preview tasks, progress updates, cancel button/menu item, and tail-follow polling |
+| Search core | `fastpad_search` literal/regex chunk scanning with cancellation checks and progress callbacks |
 | Edit buffer | `fastpad_edit` rope buffer, undo/redo transactions |
 | Replace core | `fastpad_replace` literal/regex replace and preview |
-| Pipeline foundation | `fastpad_pipeline` contains, regex, invert, extract field, head preview |
+| Pipeline foundation | `fastpad_pipeline` contains, regex, invert, extract field, head preview, and progress callbacks |
 | Tail foundation | `fastpad_tail` offset tracking, pause/resume, truncation detection |
 | Tasks/cancellation | `fastpad_tasks::CancellationToken`, `TaskHandle` |
 | Diagnostics foundation | `fastpad_diagnostics` metrics/budget structs |
@@ -66,11 +69,12 @@ Recent verification performed before this report:
 - `./scripts/smoke_attached_files.sh`
 - `scripts/build_macos_app.sh && codesign --verify --deep --strict --verbose=2 FastPad.app`
 
-Latest verification after completing the adaptive-engine, renderer foundation, and async-open items:
+Latest verification after completing the adaptive-engine, renderer foundation, async-open, benchmark-suite, search/filter/tail UI, and background-indexing items:
 
 - `cargo fmt --all -- --check`
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets`
+- `cargo run --release -p fastpad_benchmarks -- --bytes 1M --iterations 1 --output target/fastpad-benchmarks/smoke.json`
 - `scripts/build_macos_app.sh`
 - `codesign --verify --deep --strict --verbose=2 FastPad.app`
 - `./scripts/smoke_attached_files.sh`
@@ -88,16 +92,19 @@ Done:
 - Two-mode architecture exists: View/Analysis Mode and Edit Mode.
 - Internal adaptive engine profiles now exist behind those two modes.
 - Large-file-friendly primitives exist: mmap/chunk reads, lazy line indexing, viewport extraction.
+- Bounded background line-index warmup exists for View/Analysis documents and is throttled/preempted behind interactive analysis tasks.
 - View/Analysis Mode now uses a custom AppKit virtual text view backed by bounded render plans instead of feeding the page through `NSTextView`.
+- Benchmark harness exists for startup/open/search/memory/render/typing latency, with configurable large-file fixtures.
+- Current-document search, contains-filter preview, and tail follow are exposed through a native analysis results pane with cancellation.
 - Edit Mode has rope buffer, undo/redo, replace core, atomic save.
 - Native app bundle, icon, start script, and smoke tests exist.
 
 Not done:
 
-- Not yet fastest GUI text editor on macOS; no benchmark proof.
+- Not yet fastest GUI text editor on macOS; no published large-machine benchmark baselines or CI gates.
 - Custom virtual renderer is still a foundation; overlay drawing, syntax spans, selections, and full smooth scrolling are not complete.
 - Edit Mode UI still uses `NSTextView`.
-- Search/filter/tail/statistics panels are not exposed.
+- Search/filter/tail UI is still a foundation; result navigation, saved filters, export, workspace search, and statistics panels are not complete.
 - Multi-cursor, block selection, syntax highlighting, folding, bookmarks, inspectors, and settings are missing.
 - Performance targets are not enforced by benchmarks or CI.
 
@@ -119,11 +126,11 @@ This file contains 410 requirements: 56 global requirements plus 354 module requ
 | MOD-008 Rendering Pipeline | 35% | 65% | Overscan render plans, line-number gutter data, horizontal clipping, layout cache keys, and AppKit read-only virtual view. Missing overlays, syntax spans, selection rendering, dirty-region repaint breadth, and mature glyph/layout cache. |
 | MOD-009 Viewport and Scrolling | 40% | 60% | Viewport extraction, Page Down, overscan render planning, and long-line horizontal clipping. Missing smooth scroll integration and full scroll model. |
 | MOD-010 Block / Column Selection Engine | 0% | 100% | Not implemented. |
-| MOD-011 Search Engine | 30% | 70% | Core literal/regex search with cancellation checks. Missing live UI/results/workspace search. |
+| MOD-011 Search Engine | 45% | 55% | Core literal/regex search, progress callbacks, background current-document UI, bounded results, and cancellation. Missing result navigation, replace integration, workspace search, and richer query options in UI. |
 | MOD-012 Replace Engine | 25% | 75% | Core replace/preview. Missing full UI/workflow and View Mode transform/export. |
 | MOD-013 Syntax Highlighting Engine | 0% | 100% | Not implemented. |
 | MOD-014 Code Folding Engine | 0% | 100% | Not implemented. |
-| MOD-015 Large File Engine | 35% | 65% | Large-file primitives exist. Missing chunk cache policy, background indexing, benchmarks, rich UI. |
+| MOD-015 Large File Engine | 45% | 55% | Large-file primitives, configurable benchmark fixture support, and bounded background line-index warmup exist. Missing chunk cache policy depth, published multi-GB baselines, and rich UI. |
 | MOD-016 Workspace Engine | 0% | 100% | Not implemented. |
 | MOD-017 Command System | 25% | 75% | Basic registry/mode gating/menu routing. Missing palette and complete command map. |
 | MOD-018 Settings Engine | 10% | 90% | In-code defaults only. No persisted settings UI. |
@@ -132,7 +139,7 @@ This file contains 410 requirements: 56 global requirements plus 354 module requ
 | MOD-021 Macro Engine | 0% | 100% | Not implemented. |
 | MOD-022 LSP Integration | 0% | 100% | Not implemented. |
 | MOD-023 Git Integration | 0% | 100% | Not implemented. |
-| MOD-024 Testing and Diagnostics | 30% | 70% | Unit tests, smoke tests, metrics structs. Missing benchmark suite/dashboard/CI gates. |
+| MOD-024 Testing and Diagnostics | 40% | 60% | Unit tests, smoke tests, metrics structs, and JSON benchmark harness. Missing dashboard, CI regression gates, and published 1GB/10GB baselines. |
 
 ### 3. `fastpad_ai_native_srs_overview.md`
 
@@ -163,10 +170,10 @@ This file contains 138 requirements across 14 modules.
 |---|---:|---:|---|
 | BTA-001 Read-Only Analysis Mode | 35% | 65% | Auto-analysis/read-only foundation. Missing manual toggle, conversion UX, banner, bookmark/export UI. |
 | BTA-002 File Intelligence Panel | 20% | 80% | Metadata/sample intelligence core. Missing visible panel, owner/permissions, detailed estimates. |
-| BTA-003 Streaming Search with Live Results | 25% | 75% | Core streaming search. Missing live UI, progressive result panel, navigation, cancel button. |
-| BTA-004 Live Filter Mode | 20% | 80% | Pipeline/filter core. Missing filtered view UI, saved filters, export. |
+| BTA-003 Streaming Search with Live Results | 45% | 55% | Current-document search panel, progressive preview updates, and cancellation exist. Missing result navigation, workspace search, count-only/invert/export, and advanced query UI. |
+| BTA-004 Live Filter Mode | 35% | 65% | Contains-filter preview UI runs through background pipeline progress for file-backed docs and bounded in-memory preview for edit docs. Missing saved filters, filtered virtual document view, export, and visual pipeline builder. |
 | BTA-005 Text Query Language | 0% | 100% | Not implemented. |
-| BTA-006 Log File Mode | 20% | 80% | Tail-follow primitive. Missing log detection, highlighting, level filters, UI. |
+| BTA-006 Log File Mode | 35% | 65% | Tail-follow menu action and analysis pane append polling exist. Missing log detection, rotation policy depth, highlighting, level filters, and saved follow sessions. |
 | BTA-007 Structured Data Modes | 0% | 100% | Not implemented. |
 | BTA-008 Inspectors | 0% | 100% | No line/token/byte/hex inspectors. |
 | BTA-009 Pattern Detection and Data Extraction | 0% | 100% | Not implemented. |
@@ -189,12 +196,12 @@ Done:
 - Streaming search core.
 - Basic pipeline/filter core.
 - Tail-follow state.
+- Native current-document search/filter/tail analysis pane with cancellation.
 - Diagnostics structs.
 
 Not done:
 
-- No analysis panels.
-- No live search/filter UI.
+- Analysis panels are still basic and current-document only.
 - No structured data modes.
 - No inspectors, statistics, timeline/bookmark UI, smart export, or performance dashboard.
 
@@ -208,16 +215,16 @@ This file contains 109 requirements across 12 engineering modules.
 |---|---:|---:|---|
 | ENG-001 Mode Manager | 55% | 45% | Two user-facing modes, adaptive internal engine profiles, sampled file intelligence, memory-pressure-aware selection, edit gating. Missing explicit conversion flow and huge-edit confirmation UI. |
 | ENG-002 Unix-Style File Engine | 45% | 55% | mmap/chunk reads, byte ranges, tail window, atomic save. Missing robust watch/rotation/fallback policies. |
-| ENG-003 Lazy Line Index | 40% | 60% | Lazy index and visible-region/offset discovery. Missing persistence/progress UI/mixed-ending warnings. |
+| ENG-003 Lazy Line Index | 50% | 50% | Lazy index, visible-region/offset discovery, snapshot restore, progress callbacks, and bounded background warmup integration. Missing persistence, full progress UI, and mixed-ending warnings. |
 | ENG-004 Viewport and Pager Engine | 45% | 55% | Viewport extraction, Page Down, and horizontal long-line clipping in the render plan. Missing smooth GUI scrolling and full scroll state. |
-| ENG-005 Streaming Search and Grep Engine | 35% | 65% | Literal/regex/case/whole-word/bounded results. Missing progressive callbacks/UI, count-only/invert/export features. |
-| ENG-006 Tail Follow Engine | 25% | 75% | Follow offset, pause/resume, truncation detection. Missing rotation detection and UI. |
-| ENG-007 Filter, Awk and Pipeline Engine | 25% | 75% | Contains/regex/invert/extract/head. Missing sort/uniq/wc/group/count/export and visual builder. |
+| ENG-005 Streaming Search and Grep Engine | 45% | 55% | Literal/regex/case/whole-word/bounded results, progress callbacks, native current-document panel, and cancellation. Missing result navigation, count-only/invert/export features, and workspace search. |
+| ENG-006 Tail Follow Engine | 35% | 65% | Follow offset, pause/resume primitive, truncation detection, native tail panel, and stop control. Missing deeper rotation detection, follow session persistence, and log-level tooling. |
+| ENG-007 Filter, Awk and Pipeline Engine | 35% | 65% | Contains/regex/invert/extract/head plus native contains-filter preview panel with cancellation. Missing sort/uniq/wc/group/count/export and visual builder. |
 | ENG-008 Edit Buffer Engine | 35% | 65% | Rope buffer, insert/delete/replace, undo/redo, atomic save. Missing block selection, multi-cursor, line operations. |
 | ENG-009 Replace and Sed-Like Transform Engine | 30% | 70% | Replace all, regex captures, preview, one undo transaction. Missing View Mode transforms/export/cancellation UI. |
 | ENG-010 Rendering Engine | 35% | 65% | Custom visible-only AppKit virtual view, overscan render plans, gutters, horizontal clipping, and layout cache keys. Missing overlays, syntax spans, selection/block rendering, dirty-region repaint breadth, and mature glyph shaping/layout cache. |
-| ENG-011 Task Scheduler and Cancellation | 35% | 65% | Cancellation token, task handle, non-blocking completion polling, and background document-open integration. Missing priority queues, task panel, and broader search/filter/index throttling integration. |
-| ENG-012 Diagnostics and Benchmarking | 15% | 85% | Metrics/timers only. Missing benchmark suite, memory diagnostics, CI gates. |
+| ENG-011 Task Scheduler and Cancellation | 55% | 45% | Cancellation token, task handle, non-blocking completion polling, background document-open/search/filter integration, bounded background indexing, and simple preemption/throttling. Missing priority queues, task panel, and broader policy controls. |
+| ENG-012 Diagnostics and Benchmarking | 35% | 65% | Metrics/timers and JSON benchmark suite for startup/open/viewport/render/search/RSS/typing latency. Missing dashboard, CI gates, and maintained baseline reports. |
 
 ### 7. `fastpad_true_engineering_blueprint_unix_style.md`
 
@@ -232,8 +239,8 @@ Done:
 Not done:
 
 - UI thread still has synchronous render paths in places.
-- Search/filter/index operations are not yet integrated into background UI tasks.
-- No benchmark proof for startup/open/search/memory budgets.
+- Search/filter and bounded line-index warmup now use background UI tasks; broader task scheduling policy and task panels are still missing.
+- Benchmark harness exists, but maintained baseline reports and CI budget enforcement are not yet in place.
 - Custom viewport renderer foundation is not yet a full production renderer.
 - No complete follow/filter/pipeline/statistics UI.
 
@@ -247,7 +254,7 @@ Done:
 - File/Edit/Search/View/Encoding/Language/Settings/Tools sections exist.
 - Macro/Run/Plugins/Tab menus are visible.
 - Language list is visible as disabled placeholders.
-- Core commands wired: New, Open, Save, Save As, Save Copy As, Exit, Page Down, native find actions, next/previous tab, duplicate tab, pin/unpin tab.
+- Core commands wired: New, Open, Save, Save As, Save Copy As, Exit, Page Down, search, filter, tail follow, cancel analysis task, next/previous tab, duplicate tab, pin/unpin tab.
 
 Not done:
 
@@ -260,14 +267,18 @@ Not done:
 
 Completed next pending item:
 
+- Background indexing/task throttling foundation: `fastpad_line_index` can build/restore snapshots with progress callbacks, the macOS shell runs one bounded background line-index warmup at a time for View/Analysis documents, applies completed snapshots back to the document manager, and preempts indexing for search/filter/tail work.
+- Rich search/filter/tail workflow foundation: analysis results now keep structured result items, Next/Previous Result navigation jumps search matches by byte offset, the analysis pane can export current results, and Search includes quick ERROR/WARN/INFO log-level filters.
+- Search/filter/tail UI foundation: native Search menu actions now open current-document search and contains-filter prompts, stream progressive previews into the bottom analysis pane, support cancellation through the pane/menu, and provide tail-follow append polling.
+- Benchmark suite foundation: `fastpad_benchmarks` plus `scripts/run_benchmarks.sh` now produce JSON timings for startup, document open, first viewport/render, literal search, peak RSS deltas, and typing latency; fixture sizes can be set to 1GB/10GB for large-machine runs.
 - Async open task integration: file open, metadata inspection, mmap setup, mode selection, and edit-buffer load now run through background `TaskHandle`s, with AppKit polling completed tasks back onto the main thread.
 - Custom virtual renderer foundation for View/Analysis Mode: `fastpad_render` now produces bounded overscan render plans with gutter and horizontal clipping metadata, and the macOS app uses a custom read-only AppKit view for those plans.
 
 The following items block calling the application production-ready:
 
-1. Benchmark suite for startup, 1GB/10GB open, search latency, memory, frame time, and typing latency.
-2. Search/filter/tail UI with progressive results and cancellation controls.
-3. Background task integration for search/filter/indexing beyond file open.
+1. Saved search/filter workflows and workspace/project search.
+2. Full task scheduler UI and policy controls: priorities, queues, pause/resume, per-task diagnostics, and persisted throttling settings.
+3. Benchmark dashboard, CI regression gates, and maintained 1GB/10GB baseline reports.
 4. Close/reopen/recently closed tab lifecycle.
 5. Session restore: tabs, active tab, cursor/scroll, filters, search history, splits, bookmarks, zoom.
 6. File watching: external modification, deletion, truncation, log rotation.

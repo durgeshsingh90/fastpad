@@ -6,14 +6,20 @@ use cocoa::appkit::{
     NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
 };
 use cocoa::base::{id, nil, BOOL, NO, YES};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
+use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRange, NSRect, NSSize, NSString};
 use fastpad_core::{
-    write_recovery_session_manifest, AppSettings, Document, DocumentManager, EditorMode,
-    OpenIntent, OpenTabRequest, TabId, TabSummary,
+    write_recovery_session_manifest, AppSettings, Document, DocumentId, DocumentManager,
+    EditorMode, OpenIntent, OpenTabRequest, TabId, TabSummary,
 };
-use fastpad_file::atomic_write;
+use fastpad_file::{atomic_write, ByteOffset, FileHandle, FileOpenOptions};
+use fastpad_line_index::{LazyLineIndex, LineIndexSnapshot};
+use fastpad_pipeline::{
+    Pipeline, PipelineEngine, PipelineOptions, PipelineProgress, PipelineStage,
+};
 use fastpad_render::{RenderOptions, RenderPlan, DEFAULT_MAX_COLUMNS, DEFAULT_OVERSCAN_LINES};
-use fastpad_tasks::{TaskHandle, TaskProgress};
+use fastpad_search::{SearchEngine, SearchProgress, SearchQuery, SearchSummary};
+use fastpad_tail::{FollowStart, TailFollower};
+use fastpad_tasks::{ProgressThrottle, TaskHandle, TaskProgress};
 use fastpad_viewport::{ViewAnchor, ViewportRequest};
 use libc::c_char;
 use objc::declare::ClassDecl;
@@ -21,6 +27,7 @@ use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
 use std::ffi::CStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Once;
@@ -50,6 +57,14 @@ const TAB_ITEM_PADDING_X: f64 = 10.0;
 const TAB_ITEM_MIN_WIDTH: f64 = 104.0;
 const TAB_ITEM_MAX_WIDTH: f64 = 280.0;
 const TAB_ITEM_CHAR_WIDTH: f64 = 8.0;
+const ANALYSIS_PANEL_HEIGHT: f64 = 170.0;
+const ANALYSIS_PANEL_HEADER_HEIGHT: f64 = 30.0;
+const ANALYSIS_PREVIEW_LIMIT: usize = 1_000;
+const ANALYSIS_PROGRESS_INTERVAL_MS: u64 = 120;
+const TAIL_POLL_BYTES: usize = 64 * 1024;
+const TAIL_PANEL_MAX_CHARS: usize = 200_000;
+const MAX_BACKGROUND_INDEX_TASKS: usize = 1;
+const BACKGROUND_INDEX_TARGET_BYTES: u64 = 64 * 1024 * 1024;
 
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
@@ -65,34 +80,125 @@ struct AppState {
     scroll_view: id,
     text_view: id,
     virtual_view: id,
+    analysis_title_field: id,
+    analysis_text_view: id,
+    analysis_cancel_button: id,
     status_field: id,
     last_presented_text: String,
     open_tasks: Vec<TaskHandle<anyhow::Result<Document>>>,
     autosave_task: Option<TaskHandle<anyhow::Result<usize>>>,
     last_autosave_at: Instant,
+    analysis_task: Option<TaskHandle<anyhow::Result<AnalysisTaskResult>>>,
+    index_tasks: Vec<BackgroundIndexTask>,
+    tail_session: Option<TailSession>,
+    analysis_workflow: AnalysisWorkflowState,
+}
+
+#[derive(Clone, Copy)]
+struct AppViews {
+    window: id,
+    tab_bar: id,
+    scroll_view: id,
+    text_view: id,
+    virtual_view: id,
+    analysis_title_field: id,
+    analysis_text_view: id,
+    analysis_cancel_button: id,
+    status_field: id,
+}
+
+struct AnalysisTaskResult {
+    title: String,
+    text: String,
+    status: String,
+    cancelled: bool,
+    workflow_items: Vec<AnalysisResultItem>,
+}
+
+#[derive(Default)]
+struct AnalysisWorkflowState {
+    results: Vec<AnalysisResultItem>,
+    current: Option<usize>,
+    panel_title: String,
+    panel_text: String,
+}
+
+#[derive(Clone, Debug)]
+struct AnalysisResultItem {
+    label: String,
+    line_text: String,
+    byte_range: Option<(u64, usize)>,
+    line_start: Option<u64>,
+}
+
+enum AnalysisSource {
+    File { title: String, path: PathBuf },
+    Text { title: String, text: String },
+}
+
+struct TailSession {
+    title: String,
+    file: FileHandle,
+    follower: TailFollower,
+    text: String,
+    bytes_seen: u64,
+}
+
+struct BackgroundIndexTask {
+    document_id: DocumentId,
+    title: String,
+    task: TaskHandle<anyhow::Result<BackgroundIndexResult>>,
+}
+
+struct BackgroundIndexResult {
+    document_id: DocumentId,
+    title: String,
+    snapshot: LineIndexSnapshot,
+    scanned_until: ByteOffset,
+    complete: bool,
+    cancelled: bool,
+}
+
+struct SearchPanelSnapshot<'a> {
+    matches_seen: u64,
+    bytes_scanned: u64,
+    total_bytes: u64,
+    cancelled: bool,
+    elapsed: Duration,
+    results: &'a [fastpad_search::SearchMatch],
+}
+
+struct FilterPanelSnapshot<'a> {
+    processed_lines: u64,
+    emitted_lines: u64,
+    hidden_lines: u64,
+    bytes_scanned: u64,
+    total_bytes: u64,
+    cancelled: bool,
+    preview: &'a [String],
 }
 
 impl AppState {
-    unsafe fn new(
-        window: id,
-        tab_bar: id,
-        scroll_view: id,
-        text_view: id,
-        virtual_view: id,
-        status_field: id,
-    ) -> Self {
+    unsafe fn new(views: AppViews) -> Self {
         Self {
             manager: DocumentManager::new(AppSettings::default()),
-            window,
-            tab_bar,
-            scroll_view,
-            text_view,
-            virtual_view,
-            status_field,
+            window: views.window,
+            tab_bar: views.tab_bar,
+            scroll_view: views.scroll_view,
+            text_view: views.text_view,
+            virtual_view: views.virtual_view,
+            analysis_title_field: views.analysis_title_field,
+            analysis_text_view: views.analysis_text_view,
+            analysis_cancel_button: views.analysis_cancel_button,
+            status_field: views.status_field,
             last_presented_text: String::new(),
             open_tasks: Vec::new(),
             autosave_task: None,
             last_autosave_at: Instant::now(),
+            analysis_task: None,
+            index_tasks: Vec::new(),
+            tail_session: None,
+            analysis_workflow: AnalysisWorkflowState::default(),
         }
     }
 
@@ -460,6 +566,340 @@ impl AppState {
         set_tab_bar(self.tab_bar, tabs);
     }
 
+    unsafe fn run_search_prompt(&mut self) {
+        let Some(source) = self.active_analysis_source() else {
+            return;
+        };
+        let Some(pattern) = prompt_for_text("Find", "Search current document for:", "") else {
+            return;
+        };
+        if pattern.trim().is_empty() {
+            set_status(self.status_field, "Search cancelled: empty pattern.");
+            return;
+        }
+
+        let title = analysis_source_title(&source).to_string();
+        let task = spawn_search_task(source, pattern.trim().to_string());
+        self.start_analysis_task("Search Results", &format!("Searching {title}..."), task);
+    }
+
+    unsafe fn run_filter_prompt(&mut self) {
+        let Some(source) = self.active_analysis_source() else {
+            return;
+        };
+        let Some(pattern) = prompt_for_text("Filter Lines", "Show lines containing:", "") else {
+            return;
+        };
+        if pattern.trim().is_empty() {
+            set_status(self.status_field, "Filter cancelled: empty pattern.");
+            return;
+        }
+
+        let title = analysis_source_title(&source).to_string();
+        let task = spawn_filter_task(source, pattern.trim().to_string());
+        self.start_analysis_task("Filter Results", &format!("Filtering {title}..."), task);
+    }
+
+    unsafe fn run_log_level_filter(&mut self, level: &str) {
+        let Some(source) = self.active_analysis_source() else {
+            return;
+        };
+        let title = analysis_source_title(&source).to_string();
+        let task = spawn_filter_task(source, level.to_string());
+        self.start_analysis_task(
+            "Filter Results",
+            &format!("Filtering {title} for {level}..."),
+            task,
+        );
+    }
+
+    unsafe fn start_tail_follow(&mut self) {
+        if !self.sync_active_edit_buffer() {
+            return;
+        }
+
+        let Some(doc) = self.manager.active() else {
+            self.show_error("Tail follow requires an open file.");
+            return;
+        };
+        let doc = doc.read();
+        let Some(path) = doc.path().map(Path::to_path_buf) else {
+            drop(doc);
+            self.show_error("Tail follow requires a file-backed document.");
+            return;
+        };
+        let title = doc.title().to_string();
+        drop(doc);
+
+        match FileHandle::open(&path, FileOpenOptions::default()).and_then(|file| {
+            TailFollower::new(&file, FollowStart::End).map(|follower| (file, follower))
+        }) {
+            Ok((file, follower)) => {
+                if let Some(existing) = self.analysis_task.take() {
+                    existing.cancel();
+                }
+                self.cancel_background_index_tasks("Background indexing paused for tail follow.");
+                self.tail_session = None;
+                self.analysis_workflow.results.clear();
+                self.analysis_workflow.current = None;
+                let title = format!("Tail Follow: {title}");
+                self.tail_session = Some(TailSession {
+                    title: title.clone(),
+                    file,
+                    follower,
+                    text: format!("{title}\nFollowing appended bytes from end of file.\n"),
+                    bytes_seen: 0,
+                });
+                let text = self
+                    .tail_session
+                    .as_ref()
+                    .map(|session| session.text.clone())
+                    .unwrap_or_default();
+                self.present_analysis_text(&title, &text);
+                self.set_analysis_cancel_enabled(true);
+                set_status(self.status_field, "Tail follow started.");
+            }
+            Err(error) => self.show_error(&format!("Tail follow failed: {error:#}")),
+        }
+    }
+
+    unsafe fn cancel_analysis_task(&mut self) {
+        let mut cancelled = false;
+        if let Some(task) = self.analysis_task.as_ref() {
+            task.cancel();
+            cancelled = true;
+        }
+        if self.tail_session.take().is_some() {
+            cancelled = true;
+            self.analysis_workflow.results.clear();
+            self.analysis_workflow.current = None;
+            self.present_analysis_text("Tail Follow", "Tail follow stopped.");
+        }
+        if cancelled {
+            self.set_analysis_cancel_enabled(false);
+            set_status(self.status_field, "Analysis task cancellation requested.");
+        }
+    }
+
+    unsafe fn next_analysis_result(&mut self) {
+        self.navigate_analysis_result(1);
+    }
+
+    unsafe fn previous_analysis_result(&mut self) {
+        self.navigate_analysis_result(-1);
+    }
+
+    unsafe fn navigate_analysis_result(&mut self, delta: isize) {
+        let total = self.analysis_workflow.results.len();
+        if total == 0 {
+            set_status(self.status_field, "No analysis results to navigate.");
+            return;
+        }
+
+        let next = match self.analysis_workflow.current {
+            Some(current) => (current as isize + delta).rem_euclid(total as isize) as usize,
+            None if delta < 0 => total - 1,
+            None => 0,
+        };
+        self.analysis_workflow.current = Some(next);
+        let item = self.analysis_workflow.results[next].clone();
+        self.focus_analysis_result(&item, next + 1, total);
+    }
+
+    unsafe fn focus_analysis_result(
+        &mut self,
+        item: &AnalysisResultItem,
+        ordinal: usize,
+        total: usize,
+    ) {
+        let mut status = format!("Result {ordinal}/{total}: {}", item.label);
+        if !item.line_text.is_empty() {
+            status.push_str(&format!(" - {}", preview_line(&item.line_text)));
+        }
+
+        let Some(doc) = self.manager.active() else {
+            set_status(self.status_field, &status);
+            return;
+        };
+        let mode = doc.read().mode();
+        if mode == EditorMode::ViewAnalysis {
+            if let Some(offset) = item
+                .line_start
+                .or_else(|| item.byte_range.map(|(start, _)| start))
+            {
+                self.manager.update_active_view_state(|view| {
+                    view.anchor = ViewAnchor::Byte(ByteOffset(offset));
+                    view.next_anchor = None;
+                });
+                self.render_active_tab();
+            }
+        } else if let Some((start, len)) = item.byte_range {
+            let text = text_view_string(self.text_view);
+            if let Some(range) = utf16_range_for_byte_range(&text, start, len) {
+                let _: () = msg_send![self.text_view, setSelectedRange: range];
+                let _: () = msg_send![self.text_view, scrollRangeToVisible: range];
+                let _: () = msg_send![self.window, makeFirstResponder: self.text_view];
+            }
+        }
+
+        set_status(self.status_field, &status);
+    }
+
+    unsafe fn export_analysis_results(&mut self) {
+        let text = self.analysis_workflow.panel_text.clone();
+        if text.trim().is_empty() {
+            set_status(self.status_field, "No analysis results to export.");
+            return;
+        }
+        let default_name = analysis_export_file_name(&self.analysis_workflow.panel_title);
+        let Some(path) = save_panel_path("Export Analysis Results", &default_name) else {
+            return;
+        };
+
+        match fs::write(&path, text) {
+            Ok(()) => set_status(
+                self.status_field,
+                &format!("Exported analysis results to {}.", display_path(&path)),
+            ),
+            Err(error) => self.show_error(&format!("Export failed: {error:#}")),
+        }
+    }
+
+    unsafe fn active_analysis_source(&mut self) -> Option<AnalysisSource> {
+        if !self.sync_active_edit_buffer() {
+            return None;
+        }
+        let Some(doc) = self.manager.active() else {
+            self.show_error("Search and filter require an open document.");
+            return None;
+        };
+        let doc = doc.read();
+        let title = doc.title().to_string();
+        if doc.mode() == EditorMode::Edit {
+            match doc.full_text_for_editing() {
+                Ok(text) => Some(AnalysisSource::Text { title, text }),
+                Err(error) => {
+                    drop(doc);
+                    self.show_error(&format!("Cannot read edit buffer: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            match doc.path().map(Path::to_path_buf) {
+                Some(path) => Some(AnalysisSource::File { title, path }),
+                None => {
+                    drop(doc);
+                    self.show_error("Analysis requires a file-backed document.");
+                    None
+                }
+            }
+        }
+    }
+
+    unsafe fn start_analysis_task(
+        &mut self,
+        title: &str,
+        initial_text: &str,
+        task: TaskHandle<anyhow::Result<AnalysisTaskResult>>,
+    ) {
+        if let Some(existing) = self.analysis_task.take() {
+            existing.cancel();
+        }
+        self.cancel_background_index_tasks("Background indexing paused for analysis task.");
+        self.tail_session = None;
+        self.analysis_workflow.results.clear();
+        self.analysis_workflow.current = None;
+        self.analysis_task = Some(task);
+        self.present_analysis_text(title, initial_text);
+        self.set_analysis_cancel_enabled(true);
+        set_status(self.status_field, initial_text);
+    }
+
+    unsafe fn present_analysis_text(&mut self, title: &str, text: &str) {
+        self.analysis_workflow.panel_title = title.to_string();
+        self.analysis_workflow.panel_text = text.to_string();
+        let _: () = msg_send![self.analysis_title_field, setStringValue: ns_string(title)];
+        set_text_view(self.analysis_text_view, text, false);
+    }
+
+    unsafe fn set_analysis_cancel_enabled(&self, enabled: bool) {
+        let _: () = msg_send![
+            self.analysis_cancel_button,
+            setEnabled: if enabled { YES } else { NO }
+        ];
+    }
+
+    unsafe fn schedule_active_background_index(&mut self) {
+        if self.index_tasks.len() >= MAX_BACKGROUND_INDEX_TASKS {
+            return;
+        }
+
+        let Some(document_id) = self.manager.active_document_id() else {
+            return;
+        };
+        if self
+            .index_tasks
+            .iter()
+            .any(|task| task.document_id == document_id)
+        {
+            return;
+        }
+
+        let Some(document) = self.manager.active() else {
+            return;
+        };
+        let document = document.read();
+        if document.mode() != EditorMode::ViewAnalysis {
+            return;
+        }
+        let resource_state = document.resource_state();
+        if resource_state.background_indexing_suspended {
+            return;
+        }
+        let Some(path) = document.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let title = document.title().to_string();
+        let Some(metadata) = document.metadata() else {
+            return;
+        };
+        let Some(stats) = document.line_index_stats() else {
+            return;
+        };
+        if stats.complete {
+            return;
+        }
+        let target = metadata.len.min(BACKGROUND_INDEX_TARGET_BYTES);
+        if stats.scanned_until.0 >= target {
+            return;
+        }
+        let Some(snapshot) = document.line_index_snapshot() else {
+            return;
+        };
+        drop(document);
+
+        let task = spawn_background_index_task(document_id, title.clone(), path, snapshot, target);
+        self.index_tasks.push(BackgroundIndexTask {
+            document_id,
+            title: title.clone(),
+            task,
+        });
+        set_status(
+            self.status_field,
+            &format!("Background indexing queued for {title}."),
+        );
+    }
+
+    unsafe fn cancel_background_index_tasks(&mut self, reason: &str) {
+        if self.index_tasks.is_empty() {
+            return;
+        }
+        for task in &self.index_tasks {
+            task.task.cancel();
+        }
+        set_status(self.status_field, reason);
+    }
+
     unsafe fn schedule_autosave_if_due(&mut self) {
         if self.autosave_task.is_some() {
             return;
@@ -543,9 +983,174 @@ impl AppState {
             }
         }
 
-        let _ = self.manager.maintain_resource_policy();
+        let resource_summary = self.manager.maintain_resource_policy();
+        if resource_summary.indexing_tasks_suspended > 0 {
+            self.cancel_background_index_tasks("Background indexing suspended by resource policy.");
+        }
+
         self.poll_autosave_task();
+        self.poll_background_index_tasks();
+        self.poll_analysis_task();
+        self.poll_tail_session();
         self.schedule_autosave_if_due();
+        self.schedule_active_background_index();
+    }
+
+    unsafe fn poll_background_index_tasks(&mut self) {
+        let mut index = 0usize;
+        while index < self.index_tasks.len() {
+            while let Ok(progress) = self.index_tasks[index].task.progress().try_recv() {
+                if let Some(message) = progress.message {
+                    set_status(self.status_field, &message);
+                }
+            }
+
+            if !self.index_tasks[index].task.is_finished() {
+                index += 1;
+                continue;
+            }
+
+            let background = self.index_tasks.swap_remove(index);
+            match background.task.join() {
+                Ok(Ok(result)) => {
+                    if result.cancelled {
+                        set_status(
+                            self.status_field,
+                            &format!(
+                                "Background indexing cancelled for {} at {}.",
+                                result.title,
+                                byte_count(result.scanned_until.0)
+                            ),
+                        );
+                        continue;
+                    }
+                    match self
+                        .manager
+                        .apply_line_index_snapshot(result.document_id, result.snapshot)
+                    {
+                        Some(stats) => set_status(
+                            self.status_field,
+                            &format!(
+                                "Indexed {} to {}{}.",
+                                result.title,
+                                byte_count(stats.scanned_until.0),
+                                if result.complete { " (complete)" } else { "" }
+                            ),
+                        ),
+                        None => set_status(
+                            self.status_field,
+                            &format!("Background index result ignored for {}.", background.title),
+                        ),
+                    }
+                }
+                Ok(Err(error)) => set_status(
+                    self.status_field,
+                    &format!(
+                        "Background indexing failed for {}: {error:#}",
+                        background.title
+                    ),
+                ),
+                Err(error) => set_status(
+                    self.status_field,
+                    &format!(
+                        "Background indexing task failed for {}: {error}",
+                        background.title
+                    ),
+                ),
+            }
+        }
+    }
+
+    unsafe fn poll_analysis_task(&mut self) {
+        let mut latest_panel = None;
+        let mut latest_status = None;
+        let mut finished = false;
+
+        if let Some(task) = self.analysis_task.as_ref() {
+            while let Ok(progress) = task.progress().try_recv() {
+                latest_status = Some(progress_status(&progress));
+                if let Some(message) = progress.message {
+                    latest_panel = Some((progress.name, message));
+                }
+            }
+            finished = task.is_finished();
+        }
+
+        if let Some((title, text)) = latest_panel {
+            self.present_analysis_text(&title, &text);
+        }
+        if let Some(status) = latest_status {
+            set_status(self.status_field, &status);
+        }
+
+        if !finished {
+            return;
+        }
+
+        let Some(task) = self.analysis_task.take() else {
+            return;
+        };
+        match task.join() {
+            Ok(Ok(result)) => {
+                self.analysis_workflow.results = result.workflow_items;
+                self.analysis_workflow.current = None;
+                self.present_analysis_text(&result.title, &result.text);
+                self.set_analysis_cancel_enabled(false);
+                set_status(self.status_field, &result.status);
+                if result.cancelled {
+                    set_status(self.status_field, &format!("Cancelled. {}", result.status));
+                }
+            }
+            Ok(Err(error)) => {
+                self.set_analysis_cancel_enabled(false);
+                self.show_error(&format!("Analysis failed: {error:#}"));
+            }
+            Err(error) => {
+                self.set_analysis_cancel_enabled(false);
+                self.show_error(&format!("Analysis task failed: {error}"));
+            }
+        }
+    }
+
+    unsafe fn poll_tail_session(&mut self) {
+        let update = if let Some(session) = self.tail_session.as_mut() {
+            match session.follower.poll(&session.file, TAIL_POLL_BYTES) {
+                Ok(Some(event)) => {
+                    if event.truncated_or_rotated {
+                        session.text.clear();
+                        session
+                            .text
+                            .push_str("File was truncated or rotated; tail offset reset.\n");
+                    }
+                    if !event.bytes.is_empty() {
+                        session.bytes_seen =
+                            session.bytes_seen.saturating_add(event.bytes.len() as u64);
+                        session
+                            .text
+                            .push_str(&String::from_utf8_lossy(&event.bytes));
+                        trim_string_to_recent_chars(&mut session.text, TAIL_PANEL_MAX_CHARS);
+                    }
+                    Some((
+                        session.title.clone(),
+                        session.text.clone(),
+                        format!("Tail follow: {} appended bytes seen.", session.bytes_seen),
+                    ))
+                }
+                Ok(None) => None,
+                Err(error) => Some((
+                    session.title.clone(),
+                    format!("Tail follow failed: {error:#}"),
+                    format!("Tail follow failed: {error:#}"),
+                )),
+            }
+        } else {
+            None
+        };
+
+        if let Some((title, text, status)) = update {
+            self.present_analysis_text(&title, &text);
+            set_status(self.status_field, &status);
+        }
     }
 
     unsafe fn save_copy_as(&mut self) -> bool {
@@ -650,23 +1255,15 @@ fn main() {
         let delegate_class = app_delegate_class();
         let delegate: id = msg_send![delegate_class, new];
 
-        let (window, tab_bar, scroll_view, text_view, virtual_view, status_field) =
-            create_main_window();
-        let state = Box::into_raw(Box::new(AppState::new(
-            window,
-            tab_bar,
-            scroll_view,
-            text_view,
-            virtual_view,
-            status_field,
-        )));
+        let views = create_main_window(delegate);
+        let state = Box::into_raw(Box::new(AppState::new(views)));
         (*delegate).set_ivar("state", state as *mut c_void);
-        set_tab_bar_app_state(tab_bar, state as *mut c_void);
+        set_tab_bar_app_state(views.tab_bar, state as *mut c_void);
         app.setDelegate_(delegate);
 
         build_menu(app, delegate);
         install_background_task_timer(delegate);
-        window.makeKeyAndOrderFront_(nil);
+        views.window.makeKeyAndOrderFront_(nil);
         app.activateIgnoringOtherApps_(YES);
 
         let paths = std::env::args_os()
@@ -683,7 +1280,7 @@ fn main() {
     }
 }
 
-unsafe fn create_main_window() -> (id, id, id, id, id, id) {
+unsafe fn create_main_window(delegate: id) -> AppViews {
     let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(1080., 720.));
     let style = NSWindowStyleMask::NSTitledWindowMask
         | NSWindowStyleMask::NSClosableWindowMask
@@ -707,10 +1304,31 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
         NSSize::new(bounds.size.width - 20., tab_height - 8.),
     );
     let scroll_frame = NSRect::new(
+        NSPoint::new(0., status_height + ANALYSIS_PANEL_HEIGHT),
+        NSSize::new(
+            bounds.size.width,
+            bounds.size.height - status_height - tab_height - ANALYSIS_PANEL_HEIGHT,
+        ),
+    );
+    let analysis_header_frame = NSRect::new(
+        NSPoint::new(
+            10.,
+            status_height + ANALYSIS_PANEL_HEIGHT - ANALYSIS_PANEL_HEADER_HEIGHT + 5.,
+        ),
+        NSSize::new(bounds.size.width - 120., ANALYSIS_PANEL_HEADER_HEIGHT - 10.),
+    );
+    let analysis_cancel_frame = NSRect::new(
+        NSPoint::new(
+            bounds.size.width - 100.,
+            status_height + ANALYSIS_PANEL_HEIGHT - ANALYSIS_PANEL_HEADER_HEIGHT + 2.,
+        ),
+        NSSize::new(90., ANALYSIS_PANEL_HEADER_HEIGHT - 6.),
+    );
+    let analysis_scroll_frame = NSRect::new(
         NSPoint::new(0., status_height),
         NSSize::new(
             bounds.size.width,
-            bounds.size.height - status_height - tab_height,
+            ANALYSIS_PANEL_HEIGHT - ANALYSIS_PANEL_HEADER_HEIGHT,
         ),
     );
     let status_frame = NSRect::new(
@@ -758,6 +1376,45 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
 
     let virtual_view = create_virtual_text_view(scroll_frame);
 
+    let analysis_title_field: id = msg_send![class!(NSTextField), alloc];
+    let analysis_title_field: id =
+        msg_send![analysis_title_field, initWithFrame: analysis_header_frame];
+    let _: () = msg_send![analysis_title_field, setEditable: NO];
+    let _: () = msg_send![analysis_title_field, setSelectable: NO];
+    let _: () = msg_send![analysis_title_field, setBordered: NO];
+    let _: () = msg_send![analysis_title_field, setDrawsBackground: NO];
+    let title_font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 12.0f64];
+    let _: () = msg_send![analysis_title_field, setFont: title_font];
+    let _: () = msg_send![analysis_title_field, setStringValue: ns_string("Analysis Results")];
+    let _: () = msg_send![analysis_title_field, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
+    content.addSubview_(analysis_title_field);
+
+    let analysis_cancel_button: id = msg_send![class!(NSButton), alloc];
+    let analysis_cancel_button: id =
+        msg_send![analysis_cancel_button, initWithFrame: analysis_cancel_frame];
+    let _: () = msg_send![analysis_cancel_button, setTitle: ns_string("Cancel")];
+    let _: () = msg_send![analysis_cancel_button, setTarget: delegate];
+    let _: () = msg_send![analysis_cancel_button, setAction: sel!(cancelAnalysisTask:)];
+    let _: () = msg_send![analysis_cancel_button, setEnabled: NO];
+    let _: () = msg_send![analysis_cancel_button, setAutoresizingMask: NS_VIEW_MIN_Y_MARGIN];
+    content.addSubview_(analysis_cancel_button);
+
+    let analysis_scroll: id = msg_send![class!(NSScrollView), alloc];
+    let analysis_scroll: id = msg_send![analysis_scroll, initWithFrame: analysis_scroll_frame];
+    let _: () = msg_send![analysis_scroll, setHasVerticalScroller: YES];
+    let _: () = msg_send![analysis_scroll, setHasHorizontalScroller: YES];
+    let _: () = msg_send![analysis_scroll, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
+
+    let analysis_text_view: id = msg_send![class!(NSTextView), alloc];
+    let analysis_text_view: id =
+        msg_send![analysis_text_view, initWithFrame: analysis_scroll_frame];
+    let _: () = msg_send![analysis_text_view, setEditable: NO];
+    let _: () = msg_send![analysis_text_view, setSelectable: YES];
+    let analysis_font: id = msg_send![class!(NSFont), userFixedPitchFontOfSize: 12.0f64];
+    let _: () = msg_send![analysis_text_view, setFont: analysis_font];
+    let _: () = msg_send![analysis_scroll, setDocumentView: analysis_text_view];
+    content.addSubview_(analysis_scroll);
+
     let status_field: id = msg_send![class!(NSTextField), alloc];
     let status_field: id = msg_send![status_field, initWithFrame: status_frame];
     let _: () = msg_send![status_field, setEditable: NO];
@@ -768,14 +1425,17 @@ unsafe fn create_main_window() -> (id, id, id, id, id, id) {
         msg_send![status_field, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MIN_Y_MARGIN];
     content.addSubview_(status_field);
 
-    (
+    AppViews {
         window,
         tab_bar,
-        scroll,
+        scroll_view: scroll,
         text_view,
         virtual_view,
+        analysis_title_field,
+        analysis_text_view,
+        analysis_cancel_button,
         status_field,
-    )
+    }
 }
 
 unsafe fn install_background_task_timer(delegate: id) {
@@ -854,9 +1514,59 @@ unsafe fn build_menu(app: id, delegate: id) {
     edit_menu.addItem_(disabled_menu_item("Parameter Hint"));
 
     let search_menu = add_menu(menubar, "Search");
-    search_menu.addItem_(find_menu_item("Find...", "f", 1));
-    search_menu.addItem_(find_menu_item("Find Next", "g", 2));
-    search_menu.addItem_(find_menu_item("Find Previous", "G", 3));
+    search_menu.addItem_(menu_item("Find...", "f", sel!(runSearch:), delegate));
+    search_menu.addItem_(menu_item("Filter Lines...", "", sel!(runFilter:), delegate));
+    search_menu.addItem_(menu_item(
+        "Start Tail Follow",
+        "",
+        sel!(startTailFollow:),
+        delegate,
+    ));
+    search_menu.addItem_(menu_item(
+        "Cancel Analysis Task",
+        ".",
+        sel!(cancelAnalysisTask:),
+        delegate,
+    ));
+    search_menu.addItem_(separator_item());
+    search_menu.addItem_(menu_item(
+        "Next Result",
+        "g",
+        sel!(nextAnalysisResult:),
+        delegate,
+    ));
+    search_menu.addItem_(menu_item(
+        "Previous Result",
+        "G",
+        sel!(previousAnalysisResult:),
+        delegate,
+    ));
+    search_menu.addItem_(menu_item(
+        "Export Results...",
+        "",
+        sel!(exportAnalysisResults:),
+        delegate,
+    ));
+    search_menu.addItem_(separator_item());
+    search_menu.addItem_(menu_item(
+        "Filter ERROR Lines",
+        "",
+        sel!(filterErrorLines:),
+        delegate,
+    ));
+    search_menu.addItem_(menu_item(
+        "Filter WARN Lines",
+        "",
+        sel!(filterWarnLines:),
+        delegate,
+    ));
+    search_menu.addItem_(menu_item(
+        "Filter INFO Lines",
+        "",
+        sel!(filterInfoLines:),
+        delegate,
+    ));
+    search_menu.addItem_(separator_item());
     search_menu.addItem_(disabled_menu_item("Replace..."));
     search_menu.addItem_(disabled_menu_item("Find in Files..."));
     search_menu.addItem_(disabled_menu_item("Find in Projects..."));
@@ -1130,12 +1840,6 @@ unsafe fn menu_item(title: &str, key: &str, action: Sel, target: id) -> id {
 
 unsafe fn placeholder_menu_item(title: &str, key: &str, target: id) -> id {
     menu_item(title, key, sel!(showNotImplemented:), target)
-}
-
-unsafe fn find_menu_item(title: &str, key: &str, tag: i64) -> id {
-    let item = menu_item(title, key, sel!(performFindPanelAction:), nil);
-    let _: () = msg_send![item, setTag: tag];
-    item
 }
 
 unsafe fn disabled_menu_item(title: &str) -> id {
@@ -1462,6 +2166,27 @@ unsafe fn save_panel_path(title: &str, default_name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(nsstring_to_string(path)))
 }
 
+unsafe fn prompt_for_text(title: &str, message: &str, default_value: &str) -> Option<String> {
+    let alert: id = msg_send![class!(NSAlert), new];
+    let _: () = msg_send![alert, setMessageText: ns_string(title)];
+    let _: () = msg_send![alert, setInformativeText: ns_string(message)];
+    let _: id = msg_send![alert, addButtonWithTitle: ns_string("Run")];
+    let _: id = msg_send![alert, addButtonWithTitle: ns_string("Cancel")];
+
+    let input_frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(320., 24.));
+    let input: id = msg_send![class!(NSTextField), alloc];
+    let input: id = msg_send![input, initWithFrame: input_frame];
+    let _: () = msg_send![input, setStringValue: ns_string(default_value)];
+    let _: () = msg_send![alert, setAccessoryView: input];
+
+    let response: i64 = msg_send![alert, runModal];
+    if response != NS_ALERT_FIRST_BUTTON_RETURN {
+        return None;
+    }
+    let value: id = msg_send![input, stringValue];
+    Some(nsstring_to_string(value))
+}
+
 unsafe fn paths_from_url_array(urls: id) -> Vec<PathBuf> {
     let count: usize = msg_send![urls, count];
     let mut paths = Vec::with_capacity(count);
@@ -1573,6 +2298,493 @@ fn display_path(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn analysis_source_title(source: &AnalysisSource) -> &str {
+    match source {
+        AnalysisSource::File { title, .. } | AnalysisSource::Text { title, .. } => title,
+    }
+}
+
+fn spawn_background_index_task(
+    document_id: DocumentId,
+    title: String,
+    path: PathBuf,
+    snapshot: LineIndexSnapshot,
+    target: u64,
+) -> TaskHandle<anyhow::Result<BackgroundIndexResult>> {
+    TaskHandle::spawn(format!("Index: {title}"), move |token, progress| {
+        let file = FileHandle::open(&path, FileOpenOptions::default())?;
+        let file_len = file.current_len()?;
+        let target = target.min(file_len);
+        let mut index = LazyLineIndex::new(file.chunk_size());
+        index.replace_with_snapshot(snapshot);
+        let mut throttle =
+            ProgressThrottle::new(Duration::from_millis(ANALYSIS_PROGRESS_INTERVAL_MS));
+
+        index.scan_to_offset_with_progress(
+            &file,
+            ByteOffset(target),
+            || token.is_cancelled(),
+            |snapshot| {
+                if throttle.should_emit() || snapshot.cancelled || snapshot.complete {
+                    let _ = progress.send(TaskProgress {
+                        name: format!("Index: {title}"),
+                        processed_bytes: snapshot.scanned_until.0,
+                        total_bytes: Some(target),
+                        message: Some(format!(
+                            "Indexing {title}: {} lines, {}.",
+                            snapshot.indexed_lines,
+                            progress_count(snapshot.scanned_until.0, target)
+                        )),
+                    });
+                }
+            },
+        )?;
+
+        let stats = index.stats();
+        Ok(BackgroundIndexResult {
+            document_id,
+            title,
+            snapshot: index.snapshot(),
+            scanned_until: stats.scanned_until,
+            complete: stats.complete,
+            cancelled: token.is_cancelled(),
+        })
+    })
+}
+
+fn spawn_search_task(
+    source: AnalysisSource,
+    pattern: String,
+) -> TaskHandle<anyhow::Result<AnalysisTaskResult>> {
+    let title = analysis_source_title(&source).to_string();
+    TaskHandle::spawn(format!("Search: {title}"), move |token, progress| {
+        let progress_title = format!("Search Results: {title}");
+        let mut query = SearchQuery::literal(pattern.clone());
+        query.max_results = ANALYSIS_PREVIEW_LIMIT;
+
+        let summary = match source {
+            AnalysisSource::File { path, .. } => {
+                let file = FileHandle::open(&path, FileOpenOptions::default())?;
+                let mut throttle =
+                    ProgressThrottle::new(Duration::from_millis(ANALYSIS_PROGRESS_INTERVAL_MS));
+                SearchEngine::search_with_progress(&file, &query, &token, |snapshot| {
+                    if throttle.should_emit() {
+                        let text = format_search_progress(&title, &pattern, &snapshot);
+                        let _ = progress.send(TaskProgress {
+                            name: progress_title.clone(),
+                            processed_bytes: snapshot.bytes_scanned,
+                            total_bytes: Some(snapshot.total_bytes),
+                            message: Some(text),
+                        });
+                    }
+                })?
+            }
+            AnalysisSource::Text { text, .. } => {
+                let total = text.len() as u64;
+                let _ = progress.send(TaskProgress {
+                    name: progress_title.clone(),
+                    processed_bytes: 0,
+                    total_bytes: Some(total),
+                    message: Some(format!("Searching {title}...")),
+                });
+                let summary = SearchEngine::search_bytes(text.as_bytes(), &query, &token)?;
+                let _ = progress.send(TaskProgress {
+                    name: progress_title.clone(),
+                    processed_bytes: summary.bytes_scanned,
+                    total_bytes: Some(total),
+                    message: Some(format_search_summary(&title, &pattern, &summary)),
+                });
+                summary
+            }
+        };
+
+        Ok(AnalysisTaskResult {
+            title: progress_title,
+            text: format_search_summary(&title, &pattern, &summary),
+            status: format!(
+                "Search complete: {} matches, scanned {}.",
+                summary.matches_seen,
+                byte_count(summary.bytes_scanned)
+            ),
+            cancelled: summary.cancelled,
+            workflow_items: search_workflow_items(&summary),
+        })
+    })
+}
+
+fn spawn_filter_task(
+    source: AnalysisSource,
+    pattern: String,
+) -> TaskHandle<anyhow::Result<AnalysisTaskResult>> {
+    let title = analysis_source_title(&source).to_string();
+    TaskHandle::spawn(format!("Filter: {title}"), move |token, progress| {
+        let progress_title = format!("Filter Results: {title}");
+        match source {
+            AnalysisSource::File { path, .. } => {
+                let file = FileHandle::open(&path, FileOpenOptions::default())?;
+                let pipeline = Pipeline {
+                    stages: vec![PipelineStage::Contains {
+                        needle: pattern.clone(),
+                        case_sensitive: true,
+                        invert: false,
+                    }],
+                };
+                let options = PipelineOptions {
+                    preview_limit: ANALYSIS_PREVIEW_LIMIT,
+                    ..PipelineOptions::default()
+                };
+                let mut throttle =
+                    ProgressThrottle::new(Duration::from_millis(ANALYSIS_PROGRESS_INTERVAL_MS));
+                let result = PipelineEngine::run_with_progress(
+                    &file,
+                    &pipeline,
+                    &options,
+                    &token,
+                    |snapshot| {
+                        if throttle.should_emit() {
+                            let text = format_filter_progress(&title, &pattern, &snapshot);
+                            let _ = progress.send(TaskProgress {
+                                name: progress_title.clone(),
+                                processed_bytes: snapshot.bytes_scanned,
+                                total_bytes: Some(snapshot.total_bytes),
+                                message: Some(text),
+                            });
+                        }
+                    },
+                )?;
+                Ok(AnalysisTaskResult {
+                    title: progress_title,
+                    text: format_filter_result(
+                        &title,
+                        &pattern,
+                        FilterPanelSnapshot {
+                            processed_lines: result.processed_lines,
+                            emitted_lines: result.emitted_lines,
+                            hidden_lines: result.hidden_lines,
+                            bytes_scanned: result.bytes_scanned,
+                            total_bytes: file.current_len()?,
+                            cancelled: result.cancelled,
+                            preview: &result.preview,
+                        },
+                    ),
+                    status: format!(
+                        "Filter complete: {} shown from {} scanned lines.",
+                        result.emitted_lines, result.processed_lines
+                    ),
+                    cancelled: result.cancelled,
+                    workflow_items: filter_workflow_items(&result.preview),
+                })
+            }
+            AnalysisSource::Text { text, .. } => {
+                run_text_filter(&title, &pattern, &text, &token, &progress, &progress_title)
+            }
+        }
+    })
+}
+
+fn run_text_filter(
+    title: &str,
+    pattern: &str,
+    text: &str,
+    token: &fastpad_tasks::CancellationToken,
+    progress: &crossbeam_channel::Sender<TaskProgress>,
+    progress_title: &str,
+) -> anyhow::Result<AnalysisTaskResult> {
+    let mut throttle = ProgressThrottle::new(Duration::from_millis(ANALYSIS_PROGRESS_INTERVAL_MS));
+    let mut preview = Vec::new();
+    let mut processed_lines = 0u64;
+    let mut emitted_lines = 0u64;
+    let mut hidden_lines = 0u64;
+    let mut bytes_scanned = 0u64;
+    let total_bytes = text.len() as u64;
+
+    for line in text.lines() {
+        if token.is_cancelled() {
+            break;
+        }
+        processed_lines += 1;
+        bytes_scanned = bytes_scanned.saturating_add(line.len() as u64 + 1);
+        if line.contains(pattern) {
+            emitted_lines += 1;
+            if preview.len() < ANALYSIS_PREVIEW_LIMIT {
+                preview.push(line.to_string());
+            }
+        } else {
+            hidden_lines += 1;
+        }
+        if throttle.should_emit() {
+            let panel = format_filter_result(
+                title,
+                pattern,
+                FilterPanelSnapshot {
+                    processed_lines,
+                    emitted_lines,
+                    hidden_lines,
+                    bytes_scanned: bytes_scanned.min(total_bytes),
+                    total_bytes,
+                    cancelled: token.is_cancelled(),
+                    preview: &preview,
+                },
+            );
+            let _ = progress.send(TaskProgress {
+                name: progress_title.to_string(),
+                processed_bytes: bytes_scanned.min(total_bytes),
+                total_bytes: Some(total_bytes),
+                message: Some(panel),
+            });
+        }
+    }
+
+    let cancelled = token.is_cancelled();
+    Ok(AnalysisTaskResult {
+        title: progress_title.to_string(),
+        text: format_filter_result(
+            title,
+            pattern,
+            FilterPanelSnapshot {
+                processed_lines,
+                emitted_lines,
+                hidden_lines,
+                bytes_scanned: bytes_scanned.min(total_bytes),
+                total_bytes,
+                cancelled,
+                preview: &preview,
+            },
+        ),
+        status: format!(
+            "Filter complete: {} shown from {} scanned lines.",
+            emitted_lines, processed_lines
+        ),
+        cancelled,
+        workflow_items: filter_workflow_items(&preview),
+    })
+}
+
+fn format_search_progress(title: &str, pattern: &str, progress: &SearchProgress<'_>) -> String {
+    format_search_matches(
+        title,
+        pattern,
+        SearchPanelSnapshot {
+            matches_seen: progress.matches_seen,
+            bytes_scanned: progress.bytes_scanned,
+            total_bytes: progress.total_bytes,
+            cancelled: progress.cancelled,
+            elapsed: progress.elapsed,
+            results: progress.results,
+        },
+    )
+}
+
+fn format_search_summary(title: &str, pattern: &str, summary: &SearchSummary) -> String {
+    format_search_matches(
+        title,
+        pattern,
+        SearchPanelSnapshot {
+            matches_seen: summary.matches_seen,
+            bytes_scanned: summary.bytes_scanned,
+            total_bytes: summary.bytes_scanned,
+            cancelled: summary.cancelled,
+            elapsed: summary.elapsed,
+            results: &summary.results,
+        },
+    )
+}
+
+fn format_search_matches(title: &str, pattern: &str, snapshot: SearchPanelSnapshot<'_>) -> String {
+    let mut output = format!(
+        "Search \"{}\" in {}\n{} scanned, {} matches, {} shown, {:.1} ms{}\n\n",
+        preview_line(pattern),
+        title,
+        progress_count(snapshot.bytes_scanned, snapshot.total_bytes),
+        snapshot.matches_seen,
+        snapshot.results.len(),
+        snapshot.elapsed.as_secs_f64() * 1000.0,
+        if snapshot.cancelled {
+            ", cancelled"
+        } else {
+            ""
+        }
+    );
+
+    for item in snapshot.results.iter().take(ANALYSIS_PREVIEW_LIMIT) {
+        output.push_str(&format!(
+            "{:>12}: {}\n",
+            item.range.start.0,
+            preview_line(&item.line_text)
+        ));
+    }
+    output
+}
+
+fn format_filter_progress(title: &str, pattern: &str, progress: &PipelineProgress<'_>) -> String {
+    format_filter_result(
+        title,
+        pattern,
+        FilterPanelSnapshot {
+            processed_lines: progress.processed_lines,
+            emitted_lines: progress.emitted_lines,
+            hidden_lines: progress.hidden_lines,
+            bytes_scanned: progress.bytes_scanned,
+            total_bytes: progress.total_bytes,
+            cancelled: progress.cancelled,
+            preview: progress.preview,
+        },
+    )
+}
+
+fn format_filter_result(title: &str, pattern: &str, snapshot: FilterPanelSnapshot<'_>) -> String {
+    let mut output = format!(
+        "Filter \"{}\" in {}\n{} scanned, {} emitted, {} hidden, {} shown{}\n\n",
+        preview_line(pattern),
+        title,
+        progress_count(snapshot.bytes_scanned, snapshot.total_bytes),
+        snapshot.emitted_lines,
+        snapshot.hidden_lines,
+        snapshot.preview.len(),
+        if snapshot.cancelled {
+            ", cancelled"
+        } else {
+            ""
+        }
+    );
+    output.push_str(&format!("{} lines processed\n\n", snapshot.processed_lines));
+    for line in snapshot.preview.iter().take(ANALYSIS_PREVIEW_LIMIT) {
+        output.push_str(&preview_line(line));
+        output.push('\n');
+    }
+    output
+}
+
+fn search_workflow_items(summary: &SearchSummary) -> Vec<AnalysisResultItem> {
+    summary
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, item)| AnalysisResultItem {
+            label: format!("Match {} at byte {}", index + 1, item.range.start.0),
+            line_text: item.line_text.clone(),
+            byte_range: Some((item.range.start.0, item.range.len)),
+            line_start: Some(item.line_start.0),
+        })
+        .collect()
+}
+
+fn filter_workflow_items(preview: &[String]) -> Vec<AnalysisResultItem> {
+    preview
+        .iter()
+        .enumerate()
+        .map(|(index, line)| AnalysisResultItem {
+            label: format!("Preview line {}", index + 1),
+            line_text: line.clone(),
+            byte_range: None,
+            line_start: None,
+        })
+        .collect()
+}
+
+fn utf16_range_for_byte_range(text: &str, start: u64, len: usize) -> Option<NSRange> {
+    let start = usize::try_from(start).ok()?;
+    let end = start.checked_add(len)?.min(text.len());
+    if start > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+
+    Some(NSRange::new(
+        text[..start].encode_utf16().count() as u64,
+        text[start..end].encode_utf16().count() as u64,
+    ))
+}
+
+fn analysis_export_file_name(title: &str) -> String {
+    let base = title
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    let base = if base.is_empty() {
+        "fastpad-analysis".to_string()
+    } else {
+        base
+    };
+    format!("{base}.txt")
+}
+
+fn progress_status(progress: &TaskProgress) -> String {
+    match progress.total_bytes {
+        Some(total) if total > 0 => {
+            format!(
+                "{}: {}",
+                progress.name,
+                progress_count(progress.processed_bytes, total)
+            )
+        }
+        _ => format!(
+            "{}: {}",
+            progress.name,
+            byte_count(progress.processed_bytes)
+        ),
+    }
+}
+
+fn progress_count(done: u64, total: u64) -> String {
+    if total == 0 {
+        return byte_count(done);
+    }
+    let percent = (done as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+    format!(
+        "{} / {} ({percent:.1}%)",
+        byte_count(done),
+        byte_count(total)
+    )
+}
+
+fn byte_count(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.2} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.2} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn preview_line(text: &str) -> String {
+    let mut normalized = text.replace(['\r', '\n'], " ");
+    const MAX_CHARS: usize = 240;
+    if normalized.chars().count() > MAX_CHARS {
+        let mut truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
+        truncated.push_str("...");
+        normalized = truncated;
+    }
+    normalized
+}
+
+fn trim_string_to_recent_chars(text: &mut String, max_chars: usize) {
+    if text.chars().count() <= max_chars {
+        return;
+    }
+    let Some((start, _)) = text.char_indices().rev().nth(max_chars.saturating_sub(1)) else {
+        return;
+    };
+    let retained = text[start..].to_string();
+    text.clear();
+    text.push_str("[trimmed]\n");
+    text.push_str(&retained);
 }
 
 fn virtual_text_view_class() -> *const Class {
@@ -1732,6 +2944,46 @@ fn app_delegate_class() -> *const Class {
             sel!(pageDownDocument:),
             page_down_document as extern "C" fn(&Object, Sel, id),
         );
+        decl.add_method(
+            sel!(runSearch:),
+            run_search as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(runFilter:),
+            run_filter as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(startTailFollow:),
+            start_tail_follow as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(cancelAnalysisTask:),
+            cancel_analysis_task as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(nextAnalysisResult:),
+            next_analysis_result as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(previousAnalysisResult:),
+            previous_analysis_result as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(exportAnalysisResults:),
+            export_analysis_results as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(filterErrorLines:),
+            filter_error_lines as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(filterWarnLines:),
+            filter_warn_lines as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(filterInfoLines:),
+            filter_info_lines as extern "C" fn(&Object, Sel, id),
+        );
         decl.add_method(sel!(nextTab:), next_tab as extern "C" fn(&Object, Sel, id));
         decl.add_method(
             sel!(previousTab:),
@@ -1828,6 +3080,86 @@ extern "C" fn page_down_document(this: &Object, _: Sel, _: id) {
     }
 }
 
+extern "C" fn run_search(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.run_search_prompt();
+        }
+    }
+}
+
+extern "C" fn run_filter(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.run_filter_prompt();
+        }
+    }
+}
+
+extern "C" fn start_tail_follow(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.start_tail_follow();
+        }
+    }
+}
+
+extern "C" fn cancel_analysis_task(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.cancel_analysis_task();
+        }
+    }
+}
+
+extern "C" fn next_analysis_result(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.next_analysis_result();
+        }
+    }
+}
+
+extern "C" fn previous_analysis_result(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.previous_analysis_result();
+        }
+    }
+}
+
+extern "C" fn export_analysis_results(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.export_analysis_results();
+        }
+    }
+}
+
+extern "C" fn filter_error_lines(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.run_log_level_filter("ERROR");
+        }
+    }
+}
+
+extern "C" fn filter_warn_lines(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.run_log_level_filter("WARN");
+        }
+    }
+}
+
+extern "C" fn filter_info_lines(this: &Object, _: Sel, _: id) {
+    unsafe {
+        if let Some(state) = state_from_delegate(this) {
+            state.run_log_level_filter("INFO");
+        }
+    }
+}
+
 extern "C" fn next_tab(this: &Object, _: Sel, _: id) {
     unsafe {
         if let Some(state) = state_from_delegate(this) {
@@ -1911,6 +3243,7 @@ unsafe fn state_from_delegate<'a>(delegate: &Object) -> Option<&'a mut AppState>
 mod tests {
     use super::*;
     use fastpad_core::{DocumentId, TabId, ViewId};
+    use fastpad_file::ByteRange;
 
     fn summary(tab_number: u64, title: &str, active: bool) -> TabSummary {
         TabSummary {
@@ -1986,5 +3319,51 @@ mod tests {
             window_title("second.txt", &tabs),
             "2/2 second.txt - FastPad"
         );
+    }
+
+    #[test]
+    fn utf16_range_maps_utf8_byte_range_to_native_text_range() {
+        let range = utf16_range_for_byte_range("aé日z", 1, "é".len()).unwrap();
+
+        assert_eq!(range.location, 1);
+        assert_eq!(range.length, 1);
+
+        let range = utf16_range_for_byte_range("aé日z", 3, "日".len()).unwrap();
+        assert_eq!(range.location, 2);
+        assert_eq!(range.length, 1);
+    }
+
+    #[test]
+    fn export_file_name_uses_safe_text_name() {
+        assert_eq!(
+            analysis_export_file_name("Search Results: server.log"),
+            "Search_Results__server_log.txt"
+        );
+        assert_eq!(analysis_export_file_name("..."), "fastpad-analysis.txt");
+    }
+
+    #[test]
+    fn search_workflow_items_preserve_offsets_and_preview_text() {
+        let summary = SearchSummary {
+            matches_seen: 1,
+            results: vec![fastpad_search::SearchMatch {
+                range: ByteRange::new(8, 5),
+                line_start: ByteOffset(4),
+                line_end: ByteOffset(20),
+                line_text: "log ERROR line".to_string(),
+            }],
+            truncated: false,
+            bytes_scanned: 32,
+            elapsed: Duration::from_millis(3),
+            cancelled: false,
+        };
+
+        let items = search_workflow_items(&summary);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Match 1 at byte 8");
+        assert_eq!(items[0].line_text, "log ERROR line");
+        assert_eq!(items[0].byte_range, Some((8, 5)));
+        assert_eq!(items[0].line_start, Some(4));
     }
 }

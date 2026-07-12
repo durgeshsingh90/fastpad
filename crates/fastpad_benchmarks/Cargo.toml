@@ -1,27 +1,24 @@
 [package]
-name = "fastpad_app_macos"
+name = "fastpad_benchmarks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "FastPad"
+name = "fastpad-benchmarks"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-cocoa.workspace = true
-core-graphics.workspace = true
-crossbeam-channel.workspace = true
 fastpad_core = { path = "../fastpad_core" }
+fastpad_diagnostics = { path = "../fastpad_diagnostics" }
+fastpad_edit = { path = "../fastpad_edit" }
 fastpad_file = { path = "../fastpad_file" }
-fastpad_line_index = { path = "../fastpad_line_index" }
-fastpad_pipeline = { path = "../fastpad_pipeline" }
 fastpad_render = { path = "../fastpad_render" }
 fastpad_search = { path = "../fastpad_search" }
-fastpad_tail = { path = "../fastpad_tail" }
 fastpad_tasks = { path = "../fastpad_tasks" }
 fastpad_viewport = { path = "../fastpad_viewport" }
 libc.workspace = true
-objc.workspace = true
+serde.workspace = true
+serde_json.workspace = true

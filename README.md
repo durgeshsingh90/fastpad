@@ -15,13 +15,15 @@ The current repository is an MVP implementation scaffolded from the supplied SRS
 - `Save As...`, `Save a Copy As...`, multi-file open, Finder Open With, existing-window file routing, and quit prompts for unsaved documents.
 - Automatic mode selection based on file size/risk.
 - Read-only mmap/chunk file engine with bounded byte-range reads.
-- Lazy line index and visible-only viewport extraction.
+- Lazy line index, visible-only viewport extraction, and bounded background line-index warmup.
 - Grep-style literal/regex search with cancellation and bounded results.
+- Native Search menu panel for current-document search, line filtering, tail follow, progressive previews, and cancellation.
 - Rope-based Edit Mode buffer with undo/redo transactions.
 - Regex/literal replace-all as one undoable edit transaction.
 - Non-destructive streaming pipeline preview stages: contains, regex, field extraction, and head.
 - Tail-follow state for growing files.
 - Diagnostics structs for open/search/render budgets.
+- JSON benchmark harness for startup, open, viewport/render, search, memory, and typing latency.
 
 ## Build
 
@@ -41,6 +43,18 @@ Run smoke tests against the project specification files used during development:
 
 ```sh
 scripts/smoke_attached_files.sh
+```
+
+Run the default quick benchmark suite:
+
+```sh
+scripts/run_benchmarks.sh
+```
+
+Run a large-file benchmark fixture without changing the harness:
+
+```sh
+BYTES=1G ITERATIONS=1 scripts/run_benchmarks.sh
 ```
 
 Run the macOS app directly:
@@ -76,6 +90,7 @@ scripts/run_macos_app.sh
 - `crates/fastpad_render`: render plan model for visible lines and overlays.
 - `crates/fastpad_tasks`: cancellation and background task handles.
 - `crates/fastpad_diagnostics`: performance budget structs and timers.
+- `crates/fastpad_benchmarks`: benchmark harness and JSON report generator.
 
 ## Non-Negotiable Invariants
 

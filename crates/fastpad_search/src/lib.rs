@@ -50,6 +50,16 @@ pub struct SearchSummary {
     pub cancelled: bool,
 }
 
+#[derive(Debug)]
+pub struct SearchProgress<'a> {
+    pub matches_seen: u64,
+    pub results: &'a [SearchMatch],
+    pub bytes_scanned: u64,
+    pub total_bytes: u64,
+    pub elapsed: Duration,
+    pub cancelled: bool,
+}
+
 pub struct SearchEngine;
 
 impl SearchEngine {
@@ -57,6 +67,15 @@ impl SearchEngine {
         file: &FileHandle,
         query: &SearchQuery,
         cancel: &CancellationToken,
+    ) -> Result<SearchSummary> {
+        Self::search_with_progress(file, query, cancel, |_| {})
+    }
+
+    pub fn search_with_progress(
+        file: &FileHandle,
+        query: &SearchQuery,
+        cancel: &CancellationToken,
+        mut on_progress: impl FnMut(SearchProgress<'_>),
     ) -> Result<SearchSummary> {
         let start_time = Instant::now();
         if query.pattern.is_empty() {
@@ -173,6 +192,14 @@ impl SearchEngine {
             carry.clear();
             carry.extend_from_slice(&haystack[haystack.len() - keep..]);
             offset += chunk.len() as u64;
+            on_progress(SearchProgress {
+                matches_seen,
+                results: &results,
+                bytes_scanned: bytes_scanned.min(file_len),
+                total_bytes: file_len,
+                elapsed: start_time.elapsed(),
+                cancelled: cancel.is_cancelled(),
+            });
         }
 
         Ok(SearchSummary {
@@ -389,5 +416,30 @@ mod tests {
         let summary = SearchEngine::search(&file, &query, &token).unwrap();
 
         assert_eq!(summary.matches_seen, 2);
+    }
+
+    #[test]
+    fn search_with_progress_reports_partial_counts() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "needle one\nnope\nneedle two\n").unwrap();
+        let file = FileHandle::open(tmp.path(), FileOpenOptions::default()).unwrap();
+        let token = CancellationToken::new();
+        let mut query = SearchQuery::literal("needle");
+        query.chunk_size = 8;
+        let mut snapshots = Vec::new();
+
+        let summary = SearchEngine::search_with_progress(&file, &query, &token, |progress| {
+            snapshots.push((
+                progress.bytes_scanned,
+                progress.matches_seen,
+                progress.results.len(),
+            ));
+        })
+        .unwrap();
+
+        assert_eq!(summary.matches_seen, 2);
+        assert!(!snapshots.is_empty());
+        assert_eq!(snapshots.last().unwrap().0, file.current_len().unwrap());
+        assert_eq!(snapshots.last().unwrap().1, 2);
     }
 }

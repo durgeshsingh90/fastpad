@@ -22,6 +22,23 @@ pub struct LineIndexStats {
     pub visited_line_starts: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineIndexSnapshot {
+    pub line_starts: Vec<u64>,
+    pub scanned_until: ByteOffset,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineIndexProgress {
+    pub indexed_lines: usize,
+    pub scanned_until: ByteOffset,
+    pub target: ByteOffset,
+    pub file_len: u64,
+    pub complete: bool,
+    pub cancelled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct LazyLineIndex {
     line_starts: Vec<u64>,
@@ -57,13 +74,57 @@ impl LazyLineIndex {
         }
     }
 
+    pub fn snapshot(&self) -> LineIndexSnapshot {
+        LineIndexSnapshot {
+            line_starts: self.line_starts.clone(),
+            scanned_until: ByteOffset(self.scanned_until),
+            complete: self.complete,
+        }
+    }
+
+    pub fn replace_with_snapshot(&mut self, snapshot: LineIndexSnapshot) {
+        let mut line_starts = snapshot.line_starts;
+        if line_starts.first().copied() != Some(0) {
+            line_starts.push(0);
+        }
+        line_starts.sort_unstable();
+        line_starts.dedup();
+        self.line_starts = line_starts;
+        self.scanned_until = snapshot.scanned_until.0;
+        self.complete = snapshot.complete;
+        self.visited_line_starts.clear();
+    }
+
     pub fn scan_to_offset(&mut self, file: &FileHandle, target: ByteOffset) -> Result<()> {
+        self.scan_to_offset_with_progress(file, target, || false, |_| {})
+    }
+
+    pub fn scan_to_offset_with_progress(
+        &mut self,
+        file: &FileHandle,
+        target: ByteOffset,
+        mut should_cancel: impl FnMut() -> bool,
+        mut on_progress: impl FnMut(LineIndexProgress),
+    ) -> Result<()> {
         if self.complete || target.0 <= self.scanned_until {
             return Ok(());
         }
 
         let file_len = file.current_len()?;
-        while self.scanned_until < target.0.min(file_len) {
+        let target = ByteOffset(target.0.min(file_len));
+        while self.scanned_until < target.0 {
+            if should_cancel() {
+                on_progress(LineIndexProgress {
+                    indexed_lines: self.line_starts.len(),
+                    scanned_until: ByteOffset(self.scanned_until),
+                    target,
+                    file_len,
+                    complete: self.complete,
+                    cancelled: true,
+                });
+                return Ok(());
+            }
+
             let chunk = file.read_at_most(ByteOffset(self.scanned_until), self.chunk_size)?;
             if chunk.is_empty() {
                 self.complete = true;
@@ -81,6 +142,15 @@ impl LazyLineIndex {
             if self.scanned_until >= file_len {
                 self.complete = true;
             }
+
+            on_progress(LineIndexProgress {
+                indexed_lines: self.line_starts.len(),
+                scanned_until: ByteOffset(self.scanned_until),
+                target,
+                file_len,
+                complete: self.complete,
+                cancelled: false,
+            });
         }
         Ok(())
     }
@@ -256,5 +326,52 @@ mod tests {
             Some(ByteOffset(4))
         );
         assert!(index.stats().scanned_until > ByteOffset(0));
+    }
+
+    #[test]
+    fn snapshot_restores_indexed_offsets() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "a\nb\nc\nd\n").unwrap();
+        let file = FileHandle::open(tmp.path(), FileOpenOptions::default()).unwrap();
+        let mut index = LazyLineIndex::new(4);
+        index.scan_to_offset(&file, ByteOffset(6)).unwrap();
+
+        let snapshot = index.snapshot();
+        let mut restored = LazyLineIndex::new(4);
+        restored.replace_with_snapshot(snapshot);
+
+        assert_eq!(
+            restored.offset_for_line(&file, 2).unwrap(),
+            Some(ByteOffset(4))
+        );
+        assert!(restored.stats().scanned_until >= ByteOffset(6));
+    }
+
+    #[test]
+    fn scan_with_progress_can_cancel_between_chunks() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for idx in 0..5_000 {
+            writeln!(tmp, "line {idx}").unwrap();
+        }
+        let file = FileHandle::open(tmp.path(), FileOpenOptions::default()).unwrap();
+        let mut index = LazyLineIndex::new(4);
+        let mut progress = Vec::new();
+        let mut calls = 0usize;
+
+        index
+            .scan_to_offset_with_progress(
+                &file,
+                ByteOffset(file.current_len().unwrap()),
+                || {
+                    calls += 1;
+                    calls > 1
+                },
+                |snapshot| progress.push(snapshot),
+            )
+            .unwrap();
+
+        assert!(!progress.is_empty());
+        assert!(progress.iter().any(|snapshot| snapshot.cancelled));
+        assert!(!index.stats().complete);
     }
 }
